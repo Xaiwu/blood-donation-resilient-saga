@@ -2,10 +2,14 @@ import os
 import sys
 from unittest.mock import MagicMock, patch
 import pytest
+import requests
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
+sys.path.insert(
+    0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
+)
 from saga import (
     CUPOS_SERVICE_URL,
+    REGISTRO_SERVICE_URL,
     HTTPException,
     ejecutar_saga_agendamiento,
 )
@@ -60,7 +64,9 @@ def test_camino_feliz_saga_completa(mock_post, payload_donacion, id_saga_test):
 
 
 @patch("requests.post")
-def test_fallo_paso_3_dispara_compensacion_inversa(mock_post, payload_donacion, id_saga_test):
+def test_fallo_paso_3_dispara_compensacion_inversa(
+    mock_post, payload_donacion, id_saga_test
+):
     """
     Escenario 2 de la Rúbrica:
     El Paso 3 (Registro) falla con HTTP 500.
@@ -104,7 +110,9 @@ def test_fallo_paso_3_dispara_compensacion_inversa(mock_post, payload_donacion, 
 
 
 @patch("requests.post")
-def test_donante_no_apto_dispara_compensacion(mock_post, payload_donacion, id_saga_test):
+def test_donante_no_apto_dispara_compensacion(
+    mock_post, payload_donacion, id_saga_test
+):
     """
     Si el validador de elegibilidad retorna 422 (No apto),
     se debe liberar el cupo reservado y no registrar la donación.
@@ -135,7 +143,7 @@ def test_donante_no_apto_dispara_compensacion(mock_post, payload_donacion, id_sa
 
 
 @patch("requests.post")
-def test_degradacion_elegante_por_caida_elegibilidad(mock_post, payload_donacion, id_saga_test):
+def test_degradacion_por_caida_elegibilidad(mock_post, payload_donacion, id_saga_test):
     """
     Regla de negocio 2.4:
     Si Elegibilidad cae (503/timeout), se degrada a PENDIENTE_VALIDACION sin colgarse.
@@ -164,3 +172,115 @@ def test_degradacion_elegante_por_caida_elegibilidad(mock_post, payload_donacion
     assert resultado["estado"] == "PENDIENTE_VALIDACION"
     assert resultado["elegibilidad_estado"] == "PENDIENTE_VALIDACION"
     assert mock_post.call_count == 3
+
+
+@patch("requests.post")
+def test_liberacion_fallida_reintenta_y_reporta_fallo_compensacion(
+    mock_post, payload_donacion, id_saga_test
+):
+    """
+    Si POST /cupos/liberar falla con 500, reintenta 3 veces y NO miente diciendo 'cupo liberado'.
+    """
+    resp_cupos = MagicMock(status_code=200, content=b'{"ok": true}')
+    resp_eleg = MagicMock(status_code=422, content=b'{"motivo": "No apto"}')
+    resp_liberar_fail = MagicMock(status_code=500, text="DB caída")
+
+    mock_post.side_effect = [
+        resp_cupos,
+        resp_eleg,
+        resp_liberar_fail,
+        resp_liberar_fail,
+        resp_liberar_fail,
+    ]
+
+    with pytest.raises(HTTPException) as exc_info:
+        ejecutar_saga_agendamiento(payload_donacion, id_saga_test)
+
+    assert exc_info.value.status_code == 422
+    assert "falló la compensación automática" in exc_info.value.detail
+    assert "cupo liberado" not in exc_info.value.detail
+    assert (
+        mock_post.call_count == 5
+    )  # 1 reservar + 1 elegibilidad + 3 reintentos liberar
+
+
+@patch("requests.post")
+def test_timeout_en_registro_anula_registro_y_luego_libera_cupo_en_orden_inverso(
+    mock_post, payload_donacion, id_saga_test
+):
+    """
+    Si Paso 3 (Registro) lanza Timeout (resultado incierto), la Saga primero anula el registro
+    y luego libera el cupo en orden estrictamente inverso (LIFO).
+    """
+    resp_cupos = MagicMock(status_code=200, content=b'{"ok": true}')
+    resp_eleg = MagicMock(status_code=200, content=b'{"apto": true}')
+    resp_eleg.json.return_value = {"apto": True}
+    resp_anular = MagicMock(status_code=200, content=b'{"anulado": true}')
+    resp_liberar = MagicMock(status_code=200, content=b'{"liberado": true}')
+
+    mock_post.side_effect = [
+        resp_cupos,
+        resp_eleg,
+        requests.Timeout("Timeout en registro"),
+        resp_anular,
+        resp_liberar,
+    ]
+
+    with pytest.raises(HTTPException) as exc_info:
+        ejecutar_saga_agendamiento(payload_donacion, id_saga_test)
+
+    assert exc_info.value.status_code == 500
+    assert "compensada y cupo liberado" in exc_info.value.detail
+    assert mock_post.call_count == 5
+    # Orden inverso (LIFO): primero anular registro (paso 3), luego liberar cupo (paso 1)
+    assert (
+        mock_post.call_args_list[3][0][0]
+        == f"{REGISTRO_SERVICE_URL}/registro/donaciones/{id_saga_test}/anular"
+    )
+    assert mock_post.call_args_list[4][0][0] == f"{CUPOS_SERVICE_URL}/cupos/liberar"
+
+
+@patch("requests.post")
+def test_elegibilidad_400_compensa_y_200_apto_false_compensa(
+    mock_post, payload_donacion, id_saga_test
+):
+    """
+    Un 400 de Elegibilidad o un 200 con {"apto": false} NO se toma como APTO,
+    sino que dispara compensación del cupo.
+    """
+    resp_cupos = MagicMock(status_code=200, content=b'{"ok": true}')
+    resp_eleg_false = MagicMock(status_code=200, content=b'{"apto": false}')
+    resp_eleg_false.json.return_value = {"apto": False}
+    resp_liberar = MagicMock(status_code=200)
+
+    mock_post.side_effect = [resp_cupos, resp_eleg_false, resp_liberar]
+
+    with pytest.raises(HTTPException) as exc_info:
+        ejecutar_saga_agendamiento(payload_donacion, id_saga_test)
+
+    assert exc_info.value.status_code == 422
+    assert mock_post.call_args_list[2][0][0] == f"{CUPOS_SERVICE_URL}/cupos/liberar"
+
+
+@patch("requests.post")
+def test_reintento_idempotente_409_en_registro_no_libera_cupo(
+    mock_post, payload_donacion, id_saga_test
+):
+    """
+    Si un reintento con la misma Idempotency-Key recibe 409 de Registro (ya confirmado),
+    la Saga lo trata como éxito idempotente y NO libera el cupo de la donación confirmada.
+    """
+    resp_cupos = MagicMock(status_code=200, content=b'{"ok": true}')
+    resp_eleg = MagicMock(status_code=200, content=b'{"apto": true}')
+    resp_eleg.json.return_value = {"apto": True}
+    resp_reg_dup = MagicMock(
+        status_code=409, content=b'{"cita_id": "cita-99", "duplicado": true}'
+    )
+    resp_reg_dup.json.return_value = {"cita_id": "cita-99", "duplicado": True}
+
+    mock_post.side_effect = [resp_cupos, resp_eleg, resp_reg_dup]
+
+    resultado = ejecutar_saga_agendamiento(payload_donacion, id_saga_test)
+
+    assert resultado["estado"] == "CONFIRMADA"
+    assert mock_post.call_count == 3  # No se llamó a /cupos/liberar

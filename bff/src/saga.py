@@ -40,6 +40,11 @@ REGISTRO_SERVICE_URL = os.getenv(
 ).rstrip("/")
 
 TIMEOUT_SEGUNDOS = float(os.getenv("SAGA_STEP_TIMEOUT", "3.5"))
+MAX_REINTENTOS_COMPENSACION = int(os.getenv("SAGA_COMP_RETRIES", "3"))
+
+
+class ErrorResultadoInciertoRegistro(Exception):
+    """Excepción lanzada cuando el Paso 3 (Registro) falla con estado incierto (ej. timeout)."""
 
 
 def derivar_id_saga(idempotency_key: str | None) -> str:
@@ -57,42 +62,86 @@ def derivar_id_saga(idempotency_key: str | None) -> str:
         return str(uuid.uuid5(uuid.NAMESPACE_URL, clave))
 
 
-def comp_liberar_cupo(payload: Dict[str, Any], headers: Dict[str, str]) -> None:
-    """Acción compensatoria del Paso 1: libera el cupo previamente reservado."""
+def comp_liberar_cupo(payload: Dict[str, Any], headers: Dict[str, str]) -> bool:
+    """
+    Acción compensatoria del Paso 1: libera el cupo previamente reservado.
+    Reintenta hasta MAX_REINTENTOS_COMPENSACION veces y retorna True si tuvo éxito.
+    """
     url = f"{CUPOS_SERVICE_URL}/cupos/liberar"
     id_saga = headers.get("X-Saga-ID", "desconocido")
-    logger.info("[SAGA %s] Compensando: Liberando cupo en %s", id_saga, url)
-    try:
-        r = requests.post(url, json=payload, headers=headers, timeout=TIMEOUT_SEGUNDOS)
-        if r.status_code in (200, 204):
-            logger.info("[SAGA %s] Cupo liberado exitosamente en compensación", id_saga)
-        else:
+    for intento in range(1, MAX_REINTENTOS_COMPENSACION + 1):
+        logger.info(
+            "[SAGA %s] Compensando: Liberando cupo en %s (intento %d/%d)",
+            id_saga, url, intento, MAX_REINTENTOS_COMPENSACION
+        )
+        try:
+            r = requests.post(url, json=payload, headers=headers, timeout=TIMEOUT_SEGUNDOS)
+            if r.status_code in (200, 204, 404):
+                logger.info("[SAGA %s] Cupo liberado exitosamente en compensación", id_saga)
+                return True
             logger.error(
                 "[SAGA %s] Error al compensar cupo (%d): %s",
                 id_saga, r.status_code, r.text
             )
-    except requests.RequestException as e:
-        logger.critical(
-            "[SAGA %s] Fallo al contactar cupos durante compensación: %s",
-            id_saga, str(e)
-        )
+        except requests.RequestException as e:
+            logger.critical(
+                "[SAGA %s] Fallo al contactar cupos durante compensación: %s",
+                id_saga, str(e)
+            )
+    return False
 
 
-def _compensar(hechas: List[Tuple[str, Callable[[], None]]], id_saga: str) -> None:
+def comp_anular_registro(id_saga: str, payload: Dict[str, Any], headers: Dict[str, str]) -> bool:
     """
-    Ejecuta las compensaciones registradas en ORDEN ESTRICTAMENTE INVERSO (LIFO),
-    siguiendo el patrón de orquestación visto en cátedra.
+    Acción compensatoria del Paso 3: anula el registro de donación en caso de estado incierto.
+    Trata 404 como éxito idempotente (el registro no alcanzó a persistirse).
+    """
+    url = f"{REGISTRO_SERVICE_URL}/registro/donaciones/{id_saga}/anular"
+    for intento in range(1, MAX_REINTENTOS_COMPENSACION + 1):
+        logger.info(
+            "[SAGA %s] Compensando: Anulando registro en %s (intento %d/%d)",
+            id_saga, url, intento, MAX_REINTENTOS_COMPENSACION
+        )
+        try:
+            r = requests.post(url, json=payload, headers=headers, timeout=TIMEOUT_SEGUNDOS)
+            if r.status_code in (200, 204, 404):
+                logger.info("[SAGA %s] Registro anulado/verificado en compensación", id_saga)
+                return True
+            logger.error(
+                "[SAGA %s] Error al anular registro (%d): %s",
+                id_saga, r.status_code, r.text
+            )
+        except requests.RequestException as e:
+            logger.critical(
+                "[SAGA %s] Fallo al contactar registro durante compensación: %s",
+                id_saga, str(e)
+            )
+    return False
+
+
+def _compensar(hechas: List[Tuple[str, Callable[[], bool]]], id_saga: str) -> bool:
+    """
+    Ejecuta las compensaciones registradas en ORDEN ESTRICTAMENTE INVERSO (LIFO).
+    Retorna True si todas las compensaciones tuvieron éxito, False si alguna falló.
     """
     logger.warning(
         "[SAGA %s] Ejecutando compensaciones inversas (%d pendientes)...",
         id_saga, len(hechas)
     )
+    todas_ok = True
     for nombre, accion in reversed(hechas):
         try:
             logger.info("[SAGA %s] Ejecutando compensación: %s", id_saga, nombre)
-            accion()
+            exito = accion()
+            if exito is False:
+                todas_ok = False
         except Exception as e:  # pylint: disable=broad-exception-caught
-            logger.error("[SAGA %s] Error al ejecutar compensación %s: %s", id_saga, nombre, str(e))
+            logger.error(
+                "[SAGA %s] Error al ejecutar compensación %s: %s",
+                id_saga, nombre, str(e)
+            )
+            todas_ok = False
+    return todas_ok
 
 
 def paso_reservar_cupo(payload: Dict[str, Any], headers: Dict[str, str]) -> Dict[str, Any]:
@@ -100,18 +149,35 @@ def paso_reservar_cupo(payload: Dict[str, Any], headers: Dict[str, str]) -> Dict
     url = f"{CUPOS_SERVICE_URL}/cupos/reservar"
     try:
         r = requests.post(url, json=payload, headers=headers, timeout=TIMEOUT_SEGUNDOS)
+    except requests.Timeout as e:
+        # Si la reserva dio timeout, pudo haberse procesado: liberamos preventivamente
+        comp_liberar_cupo(payload, headers)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Timeout en servicio de cupos (reserva liberada preventivamente): {str(e)}",
+        ) from e
     except requests.RequestException as e:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Servicio de cupos no disponible: {str(e)}",
         ) from e
 
-    if r.status_code != 200:
+    if r.status_code in (200, 201):
+        return r.json() if r.content else {}
+    if r.status_code == 409:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"No hay cupos disponibles para la jornada: {r.text}",
         )
-    return r.json() if r.content else {}
+    if r.status_code >= 500:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Error interno en servicio de cupos ({r.status_code}): {r.text}",
+        )
+    raise HTTPException(
+        status_code=r.status_code,
+        detail=f"Solicitud rechazada por servicio de cupos ({r.status_code}): {r.text}",
+    )
 
 
 def paso_validar_elegibilidad(
@@ -120,8 +186,10 @@ def paso_validar_elegibilidad(
     """
     Paso 2: Validar la aptitud médica del donante en el servicio externo frágil.
     Retorna (estado_elegibilidad, datos_respuesta).
-    Si el donante no es apto (422), lanza HTTPException(422) para disparar compensación.
-    Si el validador cae o da timeout, degrada a 'PENDIENTE_VALIDACION' sin colgarse.
+    - 2xx con apto=True (o sin flag explícito False): retorna 'APTO'.
+    - 422 o 2xx con apto=False: lanza HTTPException(422) para compensar y abortar.
+    - 5xx o Timeout/ConnectionError: degrada a 'PENDIENTE_VALIDACION'.
+    - Otros 4xx (ej. 400, 404): lanza HTTPException con ese código para compensar.
     """
     url = f"{ELEGIBILIDAD_SERVICE_URL}/elegibilidad/validar"
     try:
@@ -131,14 +199,27 @@ def paso_validar_elegibilidad(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Donante no apto clínicamente para donación",
             )
-        if r.status_code in (500, 502, 503, 504):
+        if r.status_code >= 500:
             logger.warning(
-                "Elegibilidad respondió con error (%d). Degradando estado",
+                "Elegibilidad respondió con error 5xx (%d). Degradando estado",
                 r.status_code
             )
             return "PENDIENTE_VALIDACION", {}
+        if not 200 <= r.status_code < 300:
+            raise HTTPException(
+                status_code=r.status_code,
+                detail=f"Error de validación en elegibilidad ({r.status_code}): {r.text}",
+            )
 
-        return "APTO", (r.json() if r.content else {})
+        datos = r.json() if r.content else {}
+        if isinstance(datos, dict) and (
+            datos.get("apto") is False or datos.get("elegible") is False
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Donante no apto clínicamente para donación",
+            )
+        return "APTO", datos
     except (requests.Timeout, requests.ConnectionError) as e:
         logger.warning(
             "Elegibilidad inestable/caída (%s). Degradando a PENDIENTE_VALIDACION",
@@ -148,22 +229,41 @@ def paso_validar_elegibilidad(
 
 
 def paso_registrar_donacion(payload: Dict[str, Any], headers: Dict[str, str]) -> Dict[str, Any]:
-    """Paso 3: Registrar la donación agendada en firme en la base de datos de Registro."""
+    """
+    Paso 3: Registrar la donación agendada en firme en la base de datos de Registro.
+    Trata 409 Conflict como éxito idempotente para no liberar el cupo en reintentos.
+    """
     url = f"{REGISTRO_SERVICE_URL}/registro/donaciones"
     try:
         r = requests.post(url, json=payload, headers=headers, timeout=TIMEOUT_SEGUNDOS)
     except requests.RequestException as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Falla de conectividad con registro-service: {str(e)}",
+        raise ErrorResultadoInciertoRegistro(
+            f"Falla de conectividad/timeout con registro-service: {str(e)}"
         ) from e
 
-    if r.status_code not in (200, 201):
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Falla al registrar cita en registro-service ({r.status_code}): {r.text}",
-        )
-    return r.json() if r.content else {}
+    if r.status_code in (200, 201, 409):
+        if r.status_code == 409:
+            logger.info("Registro respondió 409 (duplicado idempotente); conservando reserva")
+        return r.json() if r.content else {"id_saga": payload.get("id_saga"), "idempotente": True}
+
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail=f"Falla al registrar cita en registro-service ({r.status_code}): {r.text}",
+    )
+
+
+def _formatear_detalle_compensacion(
+    detalle_base: str, hechas: List[Any], compensado_ok: bool
+) -> str:
+    """Construye el mensaje de error reflejando con veracidad el resultado de la compensación."""
+    if not hechas:
+        return detalle_base
+    if compensado_ok:
+        return f"{detalle_base}. Transacción compensada y cupo liberado."
+    return (
+        f"{detalle_base}. Atención: falló la compensación automática; "
+        "el cupo requiere liberación/reconciliación."
+    )
 
 
 def ejecutar_saga_agendamiento(
@@ -176,7 +276,7 @@ def ejecutar_saga_agendamiento(
     Coordina la transacción distribuida 'Agendar una Donación' entre 3 servicios:
       1. Cupos: Reservar cupo (compensación: liberar cupo).
       2. Elegibilidad: Validar aptitud (degrada a PENDIENTE_VALIDACION si cae).
-      3. Registro: Registrar donación en firme.
+      3. Registro: Registrar donación en firme (compensación: anular registro).
 
     Si el Paso 3 (o el Paso 2 por no apto) falla, ejecuta las COMPENSACIONES en orden inverso.
     """
@@ -186,7 +286,7 @@ def ejecutar_saga_agendamiento(
         "X-User-Id": user_id or "sistema",
         "X-User-Role": user_role or "desconocido",
     }
-    hechas: List[Tuple[str, Callable[[], None]]] = []
+    hechas: List[Tuple[str, Callable[[], bool]]] = []
 
     logger.info("[SAGA %s] Iniciando saga para RUT %s", id_saga, payload.get("rut_donante"))
 
@@ -207,7 +307,20 @@ def ejecutar_saga_agendamiento(
             "id_saga": id_saga,
             "estado_elegibilidad": estado_eleg,
         }
-        datos_registro = paso_registrar_donacion(payload_registro, headers_internos)
+        try:
+            datos_registro = paso_registrar_donacion(payload_registro, headers_internos)
+        except ErrorResultadoInciertoRegistro as err_incierto:
+            # Estado incierto en Paso 3: apilar compensación de Registro antes de liberar cupo
+            hechas.append(
+                (
+                    "anular_registro",
+                    lambda: comp_anular_registro(id_saga, payload_registro, headers_internos),
+                )
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=str(err_incierto),
+            ) from err_incierto
 
         estado_final = "CONFIRMADA" if estado_eleg == "APTO" else "PENDIENTE_VALIDACION"
         logger.info("[SAGA %s] SAGA COMPLETADA EXITOSAMENTE: Estado=%s", id_saga, estado_final)
@@ -227,18 +340,14 @@ def ejecutar_saga_agendamiento(
             "[SAGA %s] Error HTTP (%d): %s",
             id_saga, http_err.status_code, http_err.detail
         )
-        _compensar(hechas, id_saga)
-        detalle = (
-            f"{http_err.detail}. Transacción compensada y cupo liberado."
-            if hechas else http_err.detail
-        )
+        compensado_ok = _compensar(hechas, id_saga)
+        detalle = _formatear_detalle_compensacion(http_err.detail, hechas, compensado_ok)
         raise HTTPException(status_code=http_err.status_code, detail=detalle) from http_err
     except Exception as e:
         logger.error("[SAGA %s] Error inesperado en la Saga: %s", id_saga, str(e))
-        _compensar(hechas, id_saga)
-        detalle = (
-            f"Falla crítica en la Saga: {str(e)}. Transacción compensada y cupo liberado."
-            if hechas else f"Falla en la Saga: {str(e)}"
+        compensado_ok = _compensar(hechas, id_saga)
+        detalle = _formatear_detalle_compensacion(
+            f"Falla crítica en la Saga: {str(e)}", hechas, compensado_ok
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
