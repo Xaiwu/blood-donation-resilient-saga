@@ -115,17 +115,22 @@ class CircuitBreaker:
         except Exception as exc:
             with self._candado:
                 if es_fallo(exc):
-                    self._registrar_fallo(exc)
+                    self._registrar_fallo(exc, es_prueba)
                 elif es_prueba:
                     # La prueba no alcanzó a evaluar la dependencia: se permite otra.
                     self._prueba_en_curso = False
             raise
 
         with self._candado:
-            self._registrar_exito()
+            self._registrar_exito(es_prueba)
         return resultado
 
     # Los métodos siguientes asumen que el candado ya está tomado.
+    #
+    # Una llamada que empezó con el circuito CERRADO puede terminar cuando ya
+    # está ABIERTO o SEMIABIERTO. Ese resultado tardío solo suma a las métricas:
+    # no toca el contador ni el estado, porque en SEMIABIERTO solo la llamada de
+    # prueba decide si el circuito se cierra o se vuelve a abrir.
 
     def _estado_actual(self) -> Estado:
         if (
@@ -136,20 +141,23 @@ class CircuitBreaker:
             self._transicion(Estado.SEMIABIERTO)
         return self._estado
 
-    def _registrar_exito(self) -> None:
+    def _registrar_exito(self, es_prueba: bool) -> None:
         self.metricas["exitos"] += 1
-        self._fallos_consecutivos = 0
-        if self._estado is Estado.SEMIABIERTO:
+        estado = self._estado_actual()
+        if es_prueba and estado is Estado.SEMIABIERTO:
             self._transicion(Estado.CERRADO)
+        elif estado is Estado.CERRADO:
+            self._fallos_consecutivos = 0
 
-    def _registrar_fallo(self, exc: Exception) -> None:
+    def _registrar_fallo(self, exc: Exception, es_prueba: bool) -> None:
         self.metricas["fallos"] += 1
-        self._fallos_consecutivos += 1
-        if self._estado is Estado.SEMIABIERTO or (
-            self._estado is Estado.CERRADO
-            and self._fallos_consecutivos >= self.umbral_fallos
-        ):
+        estado = self._estado_actual()
+        if es_prueba and estado is Estado.SEMIABIERTO:
             self._transicion(Estado.ABIERTO, motivo=type(exc).__name__)
+        elif estado is Estado.CERRADO:
+            self._fallos_consecutivos += 1
+            if self._fallos_consecutivos >= self.umbral_fallos:
+                self._transicion(Estado.ABIERTO, motivo=type(exc).__name__)
 
     def _transicion(self, nuevo: Estado, motivo: str | None = None) -> None:
         anterior = self._estado
