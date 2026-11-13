@@ -27,6 +27,7 @@ logging.basicConfig(
 logger = logging.getLogger("api-gateway")
 
 BFF_URL = os.getenv("BFF_URL", "http://bff:5000").rstrip("/")
+BFF_TIMEOUT_SEGUNDOS = float(os.getenv("BFF_TIMEOUT_SEGUNDOS", "40.0"))
 RATE_LIMIT_RPM = int(os.getenv("RATE_LIMIT_RPM", "15"))
 
 app = FastAPI(
@@ -167,7 +168,7 @@ async def proxy_hacia_bff(
             params=parametros,
             headers=cabeceras_internas,
             data=cuerpo,
-            timeout=10.0,
+            timeout=BFF_TIMEOUT_SEGUNDOS,
         )
 
     try:

@@ -174,12 +174,13 @@ def test_degradacion_por_caida_elegibilidad(mock_post, payload_donacion, id_saga
     assert mock_post.call_count == 3
 
 
+@patch("saga.time.sleep")
 @patch("requests.post")
 def test_liberacion_fallida_reintenta_y_reporta_fallo_compensacion(
-    mock_post, payload_donacion, id_saga_test
+    mock_post, mock_sleep, payload_donacion, id_saga_test
 ):
     """
-    Si POST /cupos/liberar falla con 500, reintenta 3 veces y NO miente diciendo 'cupo liberado'.
+    Si POST /cupos/liberar falla con 500, reintenta 3 veces con backoff y NO miente diciendo 'cupo liberado'.
     """
     resp_cupos = MagicMock(status_code=200, content=b'{"ok": true}')
     resp_eleg = MagicMock(status_code=422, content=b'{"motivo": "No apto"}')
@@ -197,11 +198,12 @@ def test_liberacion_fallida_reintenta_y_reporta_fallo_compensacion(
         ejecutar_saga_agendamiento(payload_donacion, id_saga_test)
 
     assert exc_info.value.status_code == 422
-    assert "falló la compensación automática" in exc_info.value.detail
+    assert "falló la compensación automática en 'liberar_cupo'" in exc_info.value.detail
     assert "cupo liberado" not in exc_info.value.detail
     assert (
         mock_post.call_count == 5
     )  # 1 reservar + 1 elegibilidad + 3 reintentos liberar
+    assert mock_sleep.call_count == 2  # backoff entre intento 1->2 y 2->3
 
 
 @patch("requests.post")
@@ -284,3 +286,40 @@ def test_reintento_idempotente_409_en_registro_no_libera_cupo(
 
     assert resultado["estado"] == "CONFIRMADA"
     assert mock_post.call_count == 3  # No se llamó a /cupos/liberar
+
+
+@patch("saga.time.sleep")
+@patch("requests.post")
+def test_fallo_anulacion_registro_detiene_compensacion_sin_liberar_cupo(
+    mock_post, mock_sleep, payload_donacion, id_saga_test
+):
+    """
+    Si Paso 3 (Registro) da timeout y la compensación 'anular_registro' falla los 3 intentos,
+    _compensar debe detener la cadena LIFO y NO liberar el cupo para evitar donación sin cupo.
+    """
+    resp_cupos = MagicMock(status_code=200, content=b'{"ok": true}')
+    resp_eleg = MagicMock(status_code=200, content=b'{"apto": true}')
+    resp_eleg.json.return_value = {"apto": True}
+    resp_anular_fail = MagicMock(status_code=500, text="Registro caído")
+
+    mock_post.side_effect = [
+        resp_cupos,
+        resp_eleg,
+        requests.Timeout("Timeout en registro"),
+        resp_anular_fail,
+        resp_anular_fail,
+        resp_anular_fail,
+    ]
+
+    with pytest.raises(HTTPException) as exc_info:
+        ejecutar_saga_agendamiento(payload_donacion, id_saga_test)
+
+    assert exc_info.value.status_code == 500
+    assert "anular_registro" in exc_info.value.detail
+    assert "se detuvo la liberación del cupo" in exc_info.value.detail
+    assert "cupo liberado" not in exc_info.value.detail
+    # 1 reservar + 1 elegibilidad + 1 timeout registro + 3 reintentos anular (0 liberar cupo)
+    assert mock_post.call_count == 6
+    urls_llamadas = [call[0][0] for call in mock_post.call_args_list]
+    assert f"{CUPOS_SERVICE_URL}/cupos/liberar" not in urls_llamadas
+    assert mock_sleep.call_count == 2

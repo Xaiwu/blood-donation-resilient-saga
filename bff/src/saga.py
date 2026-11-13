@@ -4,6 +4,7 @@ Coordina Cupos, Elegibilidad y Registro aplicando compensación inversa (LIFO).
 """
 import logging
 import os
+import time
 import uuid
 from typing import Any, Callable, Dict, List, Tuple
 
@@ -41,6 +42,7 @@ REGISTRO_SERVICE_URL = os.getenv(
 
 TIMEOUT_SEGUNDOS = float(os.getenv("SAGA_STEP_TIMEOUT", "3.5"))
 MAX_REINTENTOS_COMPENSACION = int(os.getenv("SAGA_COMP_RETRIES", "3"))
+BACKOFF_COMPENSACION = float(os.getenv("SAGA_COMP_BACKOFF", "0.3"))
 
 
 class ErrorResultadoInciertoRegistro(Exception):
@@ -88,6 +90,8 @@ def comp_liberar_cupo(payload: Dict[str, Any], headers: Dict[str, str]) -> bool:
                 "[SAGA %s] Fallo al contactar cupos durante compensación: %s",
                 id_saga, str(e)
             )
+        if intento < MAX_REINTENTOS_COMPENSACION and BACKOFF_COMPENSACION > 0:
+            time.sleep(BACKOFF_COMPENSACION * intento)
     return False
 
 
@@ -116,32 +120,39 @@ def comp_anular_registro(id_saga: str, payload: Dict[str, Any], headers: Dict[st
                 "[SAGA %s] Fallo al contactar registro durante compensación: %s",
                 id_saga, str(e)
             )
+        if intento < MAX_REINTENTOS_COMPENSACION and BACKOFF_COMPENSACION > 0:
+            time.sleep(BACKOFF_COMPENSACION * intento)
     return False
 
 
-def _compensar(hechas: List[Tuple[str, Callable[[], bool]]], id_saga: str) -> bool:
+def _compensar(hechas: List[Tuple[str, Callable[[], bool]]], id_saga: str) -> str | None:
     """
     Ejecuta las compensaciones registradas en ORDEN ESTRICTAMENTE INVERSO (LIFO).
-    Retorna True si todas las compensaciones tuvieron éxito, False si alguna falló.
+    Si una compensación falla, detiene la cadena para evitar dejar estados inconsistentes
+    entre pasos y retorna el nombre de la compensación fallida (o None si todas pasaron).
     """
     logger.warning(
         "[SAGA %s] Ejecutando compensaciones inversas (%d pendientes)...",
         id_saga, len(hechas)
     )
-    todas_ok = True
     for nombre, accion in reversed(hechas):
         try:
             logger.info("[SAGA %s] Ejecutando compensación: %s", id_saga, nombre)
             exito = accion()
             if exito is False:
-                todas_ok = False
+                logger.critical(
+                    "[SAGA %s] Falló la compensación '%s'. Se detiene la cadena LIFO "
+                    "para evitar estado inconsistente.",
+                    id_saga, nombre
+                )
+                return nombre
         except Exception as e:  # pylint: disable=broad-exception-caught
-            logger.error(
-                "[SAGA %s] Error al ejecutar compensación %s: %s",
+            logger.critical(
+                "[SAGA %s] Error al ejecutar compensación '%s': %s. Se detiene la cadena LIFO.",
                 id_saga, nombre, str(e)
             )
-            todas_ok = False
-    return todas_ok
+            return nombre
+    return None
 
 
 def paso_reservar_cupo(payload: Dict[str, Any], headers: Dict[str, str]) -> Dict[str, Any]:
@@ -253,16 +264,21 @@ def paso_registrar_donacion(payload: Dict[str, Any], headers: Dict[str, str]) ->
 
 
 def _formatear_detalle_compensacion(
-    detalle_base: str, hechas: List[Any], compensado_ok: bool
+    detalle_base: str, hechas: List[Any], compensacion_fallida: str | None
 ) -> str:
     """Construye el mensaje de error reflejando con veracidad el resultado de la compensación."""
     if not hechas:
         return detalle_base
-    if compensado_ok:
+    if compensacion_fallida is None:
         return f"{detalle_base}. Transacción compensada y cupo liberado."
+    if compensacion_fallida == "anular_registro":
+        return (
+            f"{detalle_base}. Atención: falló la compensación automática en 'anular_registro'; "
+            "se detuvo la liberación del cupo para evitar inconsistencia y requiere reconciliación."
+        )
     return (
-        f"{detalle_base}. Atención: falló la compensación automática; "
-        "el cupo requiere liberación/reconciliación."
+        f"{detalle_base}. Atención: falló la compensación automática en '{compensacion_fallida}'; "
+        "requiere liberación/reconciliación."
     )
 
 
@@ -340,14 +356,14 @@ def ejecutar_saga_agendamiento(
             "[SAGA %s] Error HTTP (%d): %s",
             id_saga, http_err.status_code, http_err.detail
         )
-        compensado_ok = _compensar(hechas, id_saga)
-        detalle = _formatear_detalle_compensacion(http_err.detail, hechas, compensado_ok)
+        compensacion_fallida = _compensar(hechas, id_saga)
+        detalle = _formatear_detalle_compensacion(http_err.detail, hechas, compensacion_fallida)
         raise HTTPException(status_code=http_err.status_code, detail=detalle) from http_err
     except Exception as e:
         logger.error("[SAGA %s] Error inesperado en la Saga: %s", id_saga, str(e))
-        compensado_ok = _compensar(hechas, id_saga)
+        compensacion_fallida = _compensar(hechas, id_saga)
         detalle = _formatear_detalle_compensacion(
-            f"Falla crítica en la Saga: {str(e)}", hechas, compensado_ok
+            f"Falla crítica en la Saga: {str(e)}", hechas, compensacion_fallida
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
