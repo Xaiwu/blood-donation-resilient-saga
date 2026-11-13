@@ -1,0 +1,61 @@
+# Sistema distribuido resiliente — Donación de sangre (Forma N)
+#
+#   docker compose up --build
+#
+# Solo el gateway se expone al exterior (localhost:8080). El resto de los
+# servicios vive en la red "interna", que no tiene salida al host.
+# Cupos, Registro y Elegibilidad se agregan aquí cuando estén en el repo.
+
+services:
+  api-gateway:
+    build: ./api-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      BFF_URL: "http://bff:5000"
+      RATE_LIMIT_RPM: "${RATE_LIMIT_RPM:-15}"
+      JWT_SECRET: "${JWT_SECRET:-}"
+      JWT_EXPIRA_SEGUNDOS: "${JWT_EXPIRA_SEGUNDOS:-3600}"
+      USUARIO_LECTURA: "${USUARIO_LECTURA:-lector}"
+      CLAVE_LECTURA: "${CLAVE_LECTURA:-lector123}"
+      USUARIO_ESCRITURA: "${USUARIO_ESCRITURA:-operador}"
+      CLAVE_ESCRITURA: "${CLAVE_ESCRITURA:-operador123}"
+    networks:
+      - perimetral
+      - interna
+    depends_on:
+      bff:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  bff:
+    build: ./bff
+    environment:
+      CUPOS_SERVICE_URL: "http://cupos-service:5001"
+      ELEGIBILIDAD_SERVICE_URL: "http://elegibilidad-service:5002"
+      REGISTRO_SERVICE_URL: "http://registro-service:5003"
+      SAGA_STEP_TIMEOUT: "${SAGA_STEP_TIMEOUT:-3.5}"
+      SAGA_COMP_RETRIES: "${SAGA_COMP_RETRIES:-3}"
+      # Resiliencia sobre Elegibilidad (false = experimento sin el patrón)
+      CB_ACTIVO: "${CB_ACTIVO:-true}"
+      CB_UMBRAL_FALLOS: "${CB_UMBRAL_FALLOS:-3}"
+      CB_RECUPERACION_S: "${CB_RECUPERACION_S:-10}"
+      BULKHEAD_ACTIVO: "${BULKHEAD_ACTIVO:-true}"
+      BULKHEAD_MAX_CONCURRENTES: "${BULKHEAD_MAX_CONCURRENTES:-5}"
+      BULKHEAD_MAX_ESPERA_S: "${BULKHEAD_MAX_ESPERA_S:-0}"
+    networks:
+      - interna
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+networks:
+  perimetral:
+  interna:
+    internal: true
