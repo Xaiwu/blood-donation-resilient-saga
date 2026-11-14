@@ -97,7 +97,7 @@ def reservar_cupo(rut_donante: str, id_jornada: str, horario: str, id_saga: str,
                         "idempotente": True,
                     }
 
-            # 2. Validar stock disponible en la jornada
+            # Validar stock disponible en la jornada
             conn.execute(
                 "INSERT OR IGNORE INTO jornadas (id_jornada, nombre, fecha, capacidad_total, cupos_disponibles) "
                 "VALUES (?, ?, date('now'), 10, 10)",
@@ -108,7 +108,7 @@ def reservar_cupo(rut_donante: str, id_jornada: str, horario: str, id_saga: str,
                 logger.warning("[CUPOS] RECHAZO SIN CUPOS (409) | jornada=%s", id_jornada)
                 raise JornadaSinCuposError(f"La jornada '{id_jornada}' no dispone de cupos disponibles.")
 
-            # 3. Descontar stock y guardar reserva
+            # Descontar stock y guardar reserva
             conn.execute(
                 "UPDATE jornadas SET cupos_disponibles = cupos_disponibles - 1 WHERE id_jornada = ?",
                 (id_jornada,),
@@ -147,7 +147,7 @@ def reservar_cupo(rut_donante: str, id_jornada: str, horario: str, id_saga: str,
         raise ColisionIdempotenciaError("Conflicto de integridad en identificador de cupo o SAGA.") from exc
 
 def liberar_cupo(id_saga: str, db_path: Optional[str] = None) -> Dict[str, Any]:
-    """Libera un cupo reservado (compensación inversa SAGA idempotente mediante log_cupos)."""
+    """Libera un cupo reservado"""
     with immediate_transaction(db_path) as conn:
         reserva = conn.execute("SELECT * FROM cupos WHERE id_saga = ?", (id_saga,)).fetchone()
         if reserva is None:
@@ -157,7 +157,7 @@ def liberar_cupo(id_saga: str, db_path: Optional[str] = None) -> Dict[str, Any]:
         id_cupo_actual = reserva["id_cupo"]
         jornada_actual = reserva["id_jornada"]
 
-        # 1. Verificar idempotencia en log_cupos o en el estado actual
+        # Verificar idempotencia en log_cupos o en el estado actual
         ya_liberado = conn.execute(
             "SELECT 1 FROM log_cupos WHERE id_cupo = ? AND accion IN ('LIBERAR', 'LIBERAR_IDEMPOTENTE') LIMIT 1",
             (id_cupo_actual,),
@@ -178,7 +178,7 @@ def liberar_cupo(id_saga: str, db_path: Optional[str] = None) -> Dict[str, Any]:
                 "mensaje": "El cupo ya había sido liberado previamente (operación idempotente).",
             }
 
-        # 2. Revertir estado y restituir cupo en la jornada
+        # Revertir estado y restituir cupo en la jornada
         conn.execute("UPDATE cupos SET estado = 'LIBERADO', updated_at = datetime('now') WHERE id_cupo = ?", (id_cupo_actual,))
         conn.execute(
             "UPDATE jornadas SET cupos_disponibles = MIN(capacidad_total, cupos_disponibles + 1) WHERE id_jornada = ?",
@@ -199,7 +199,7 @@ def liberar_cupo(id_saga: str, db_path: Optional[str] = None) -> Dict[str, Any]:
         }
 
 def obtener_cupos_donante(rut_donante: str, db_path: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Retorna la lista de cupos reservados activos de un donante para agregación en el BFF."""
+    """Retorna la lista de cupos reservados activos de un donante"""
     conn = get_connection(db_path)
     try:
         rows = conn.execute("SELECT id_cupo, id_jornada, horario, estado FROM cupos "
