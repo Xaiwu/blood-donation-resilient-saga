@@ -11,6 +11,12 @@ from typing import Any, Callable, Dict, List, Tuple
 import requests
 
 try:
+    from .resiliencia import ClienteResiliente, DependenciaNoDisponible
+except ImportError:
+    # Las pruebas importan saga como módulo suelto (sys.path apunta a src/)
+    from resiliencia import ClienteResiliente, DependenciaNoDisponible
+
+try:
     from fastapi import HTTPException, status
 except ImportError:
     # Fallback para permitir pruebas unitarias locales independientes del framework web
@@ -43,6 +49,10 @@ REGISTRO_SERVICE_URL = os.getenv(
 TIMEOUT_SEGUNDOS = float(os.getenv("SAGA_STEP_TIMEOUT", "3.5"))
 MAX_REINTENTOS_COMPENSACION = int(os.getenv("SAGA_COMP_RETRIES", "3"))
 BACKOFF_COMPENSACION = float(os.getenv("SAGA_COMP_BACKOFF", "0.3"))
+
+# Circuit Breaker + Bulkhead sobre Elegibilidad. Una sola instancia por proceso:
+# el estado del circuito vive en memoria.
+elegibilidad_resiliente = ClienteResiliente.desde_entorno()
 
 
 class ErrorResultadoInciertoRegistro(Exception):
@@ -204,7 +214,9 @@ def paso_validar_elegibilidad(
     """
     url = f"{ELEGIBILIDAD_SERVICE_URL}/elegibilidad/validar"
     try:
-        r = requests.post(url, json=payload, headers=headers, timeout=TIMEOUT_SEGUNDOS)
+        r = elegibilidad_resiliente.post(
+            url, json=payload, headers=headers, timeout=TIMEOUT_SEGUNDOS
+        )
         if r.status_code == 422:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -231,7 +243,8 @@ def paso_validar_elegibilidad(
                 detail="Donante no apto clínicamente para donación",
             )
         return "APTO", datos
-    except (requests.Timeout, requests.ConnectionError) as e:
+    except (requests.Timeout, requests.ConnectionError, DependenciaNoDisponible) as e:
+        # DependenciaNoDisponible: circuito abierto o bulkhead lleno (fail-fast)
         logger.warning(
             "Elegibilidad inestable/caída (%s). Degradando a PENDIENTE_VALIDACION",
             type(e).__name__
