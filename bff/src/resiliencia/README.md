@@ -72,5 +72,5 @@ Cada cambio de estado del circuito y cada rechazo del bulkhead queda como una l√
 
 ```
 {"evento": "circuito_transicion", "circuito": "elegibilidad", "desde": "CERRADO", "hacia": "ABIERTO", "fallos_consecutivos": 3, "motivo": "ConnectionError", ...}
-{"evento": "bulkhead_rechazo", "bulkhead": "elegibilidad", "en_curso": 5, "max_concurrentes": 5, ...}
+{"evento": "bulkhead_rechazo", "bulkhead": "elegibilidad", "max_concurrentes": 5, ...}
 ```

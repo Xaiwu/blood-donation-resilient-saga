@@ -66,16 +66,16 @@ class Bulkhead:
         if not admitida:
             with self._candado:
                 self.metricas["rechazadas"] += 1
-                en_curso = self.en_curso
+            # No se informa en_curso: entre el acquire fallido y esta línea otra
+            # llamada puede haber terminado, y el número no sería el del rechazo.
             registrar_evento(
                 log,
                 "bulkhead_rechazo",
                 bulkhead=self.nombre,
-                en_curso=en_curso,
                 max_concurrentes=self.max_concurrentes,
             )
             raise BulkheadLleno(
-                f"bulkhead '{self.nombre}' lleno ({en_curso}/{self.max_concurrentes})"
+                f"bulkhead '{self.nombre}' lleno (máximo {self.max_concurrentes} llamadas simultáneas)"
             )
         try:
             return self._medir(operacion)
