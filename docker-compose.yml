@@ -13,6 +13,7 @@ services:
       - "8080:8080"
     environment:
       BFF_URL: "http://bff:5000"
+      BFF_TIMEOUT_SEGUNDOS: "${BFF_TIMEOUT_SEGUNDOS:-40}"
       RATE_LIMIT_RPM: "${RATE_LIMIT_RPM:-15}"
       JWT_SECRET: "${JWT_SECRET:-}"
       JWT_EXPIRA_SEGUNDOS: "${JWT_EXPIRA_SEGUNDOS:-3600}"
@@ -40,6 +41,7 @@ services:
       REGISTRO_SERVICE_URL: "http://registro-service:5003"
       SAGA_STEP_TIMEOUT: "${SAGA_STEP_TIMEOUT:-3.5}"
       SAGA_COMP_RETRIES: "${SAGA_COMP_RETRIES:-3}"
+      SAGA_COMP_BACKOFF: "${SAGA_COMP_BACKOFF:-0.3}"
       # Resiliencia sobre Elegibilidad (false = experimento sin el patrón)
       CB_ACTIVO: "${CB_ACTIVO:-true}"
       CB_UMBRAL_FALLOS: "${CB_UMBRAL_FALLOS:-3}"
