@@ -1,8 +1,9 @@
-"""Pruebas unitarias de persistencia, idempotencia y compensación para registro-service."""
+"""Pruebas unitarias de persistencia, idempotencia, compensación y endpoints HTTP para registro-service."""
 
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -17,6 +18,16 @@ from src.db import (
     obtener_citas_donante,
     registrar_donacion,
 )
+
+from unittest.mock import patch
+
+try:
+    from fastapi.testclient import TestClient
+    from src.main import app
+
+    FASTAPI_DISPONIBLE = True
+except ImportError:
+    FASTAPI_DISPONIBLE = False
 
 
 class TestRegistroPersistence(unittest.TestCase):
@@ -51,14 +62,14 @@ class TestRegistroPersistence(unittest.TestCase):
         with self.assertRaises(ColisionIdempotenciaError):
             registrar_donacion("saga-col", "12.345.678-9", "Ana", "JORNADA-02", "09:00", "APTO", self.db_path)
 
-    def test_degradacion_pendiente_validacion_y_rechazo_invalido(self) -> None:
-        """Verifica el estado PENDIENTE_VALIDACION cuando Elegibilidad degrada y ValueError ante estado inválido."""
+    def test_degradacion_pendiente_validacion_y_check_integrity_error(self) -> None:
+        """Verifica PENDIENTE_VALIDACION y que una violación CHECK de SQLite no se disfraza como 409."""
         r_deg = registrar_donacion(
             "saga-deg", "12.345.678-9", "Ana", "JORNADA-01", "10:30", "PENDIENTE_VALIDACION", self.db_path
         )
         self.assertEqual(r_deg["estado"], "PENDIENTE_VALIDACION")
 
-        with self.assertRaises(ValueError):
+        with self.assertRaises(sqlite3.IntegrityError):
             registrar_donacion("saga-inv", "12.345.678-9", "Ana", "JORNADA-01", "11:00", "NO_APTO", self.db_path)
 
     def test_anulacion_idempotente_y_no_encontrada_404(self) -> None:
@@ -97,6 +108,81 @@ class TestRegistroPersistence(unittest.TestCase):
         self.assertFalse(a2["idempotente"])
         self.assertEqual(a2["estado"], "ANULADA")
         self.assertEqual(len(obtener_citas_donante("12.345.678-9", db_path=self.db_path)), 0)
+
+
+@unittest.skipUnless(FASTAPI_DISPONIBLE, "FastAPI/TestClient no instalado en el entorno local")
+class TestRegistroEndpoints(unittest.TestCase):
+    """Pruebas de contrato HTTP con TestClient (X-Saga-ID, validación de campos obligatorios y compensación)."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.temp_dir, "test_endpoints.db")
+        os.environ["DATABASE_PATH"] = self.db_path
+        init_db(self.db_path)
+        self.client = TestClient(app)
+
+    def tearDown(self) -> None:
+        os.environ.pop("DATABASE_PATH", None)
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_contrato_saga_con_header_x_saga_id_y_campos_obligatorios(self) -> None:
+        """Verifica registro enviando X-Saga-ID por cabecera, rechazo 422 si faltan campos y anulación con body."""
+        # 1. Si faltan nombre_donante, id_jornada u horario -> 422
+        resp_incompleto = self.client.post(
+            "/registro/donaciones",
+            json={"rut_donante": "12.345.678-9"},
+            headers={"X-Saga-ID": "saga-hdr-01"},
+        )
+        self.assertEqual(resp_incompleto.status_code, 422)
+
+        # 2. Registro enviando id_saga únicamente en la cabecera X-Saga-ID -> 201
+        payload_saga = {
+            "rut_donante": "12.345.678-9",
+            "nombre_donante": "Ana Pérez",
+            "id_jornada": "JORNADA-01",
+            "horario": "09:00",
+            "estado_elegibilidad": "APTO",
+        }
+        resp_creado = self.client.post(
+            "/registro/donaciones",
+            json=payload_saga,
+            headers={"X-Saga-ID": "saga-hdr-01"},
+        )
+        self.assertEqual(resp_creado.status_code, 201)
+        self.assertEqual(resp_creado.json()["id_saga"], "saga-hdr-01")
+        self.assertFalse(resp_creado.json()["idempotente"])
+
+        # 3. Reintento idempotente con X-Saga-ID -> 200
+        resp_idem = self.client.post(
+            "/registro/donaciones",
+            json=payload_saga,
+            headers={"X-Saga-ID": "saga-hdr-01"},
+        )
+        self.assertEqual(resp_idem.status_code, 200)
+        self.assertTrue(resp_idem.json()["idempotente"])
+
+        # 4. Consulta por donante -> 200 con 1 cita activa
+        resp_get = self.client.get("/registro/donantes/12.345.678-9")
+        self.assertEqual(resp_get.status_code, 200)
+        self.assertEqual(len(resp_get.json()), 1)
+
+        # 5. Anulación enviando body como lo hace la Saga -> 200
+        resp_anular = self.client.post(
+            "/registro/donaciones/saga-hdr-01/anular",
+            json=payload_saga,
+            headers={"X-Saga-ID": "saga-hdr-01"},
+        )
+        self.assertEqual(resp_anular.status_code, 200)
+        self.assertEqual(resp_anular.json()["estado"], "ANULADA")
+
+        # 6. Si ocurre un IntegrityError distinto de UNIQUE (ej. CHECK), responde 500 y no 409
+        with patch("src.main.registrar_donacion", side_effect=sqlite3.IntegrityError("CHECK constraint failed")):
+            resp_check = self.client.post(
+                "/registro/donaciones",
+                json=payload_saga,
+                headers={"X-Saga-ID": "saga-hdr-02"},
+            )
+            self.assertEqual(resp_check.status_code, 500)
 
 
 if __name__ == "__main__":

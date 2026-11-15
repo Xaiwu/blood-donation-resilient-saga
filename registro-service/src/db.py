@@ -72,16 +72,13 @@ def _registrar_log(conn: sqlite3.Connection, id_cita: str, id_saga: str, rut: st
 def registrar_donacion(
     id_saga: str,
     rut_donante: str,
-    nombre_donante: str = "Donante",
-    id_jornada: str = "JORNADA-GENERAL",
-    horario: str = "09:00",
+    nombre_donante: str,
+    id_jornada: str,
+    horario: str,
     estado_elegibilidad: str = "APTO",
     db_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Registra una cita médica de donación de forma atómica e idempotente."""
-    if estado_elegibilidad not in ("APTO", "PENDIENTE_VALIDACION"):
-        raise ValueError(f"Estado de elegibilidad inválido: '{estado_elegibilidad}'.")
-
     estado_cita = "PENDIENTE_VALIDACION" if estado_elegibilidad == "PENDIENTE_VALIDACION" else "CONFIRMADA"
 
     try:
@@ -138,8 +135,11 @@ def registrar_donacion(
                 "idempotente": False,
             }
     except sqlite3.IntegrityError as exc:
-        logger.warning("[REGISTRO] Violación de integridad SQLite (409): %s", exc)
-        raise ColisionIdempotenciaError("Conflicto de integridad en identificador de cita o SAGA.") from exc
+        if "UNIQUE" in str(exc).upper():
+            logger.warning("[REGISTRO] Violación UNIQUE SQLite (409): %s", exc)
+            raise ColisionIdempotenciaError("Conflicto de integridad en identificador de cita o SAGA.") from exc
+        logger.error("[REGISTRO] Violación de restricción SQLite (500): %s", exc)
+        raise
 
 
 def anular_donacion(id_saga: str, db_path: Optional[str] = None) -> Dict[str, Any]:
@@ -188,7 +188,7 @@ def anular_donacion(id_saga: str, db_path: Optional[str] = None) -> Dict[str, An
 
 
 def obtener_citas_donante(rut_donante: str, db_path: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Retorna el historial de citas médicas activas de un donante por su RUT."""
+    """Retorna la lista de citas médicas activas (no anuladas) de un donante por su RUT."""
     conn = get_connection(db_path)
     try:
         rows = conn.execute(
