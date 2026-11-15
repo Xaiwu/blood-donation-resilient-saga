@@ -15,6 +15,7 @@ from .saga import (
     REGISTRO_SERVICE_URL,
     derivar_id_saga,
     ejecutar_saga_agendamiento,
+    elegibilidad_resiliente,
 )
 
 logging.basicConfig(
@@ -40,6 +41,12 @@ def health_check():
         "cupos_target": CUPOS_SERVICE_URL,
         "registro_target": REGISTRO_SERVICE_URL,
     }
+
+
+@app.get("/resiliencia/estado", tags=["Resiliencia"])
+def estado_resiliencia():
+    """Expone las métricas y estado actual del Circuit Breaker y Bulkhead hacia Elegibilidad."""
+    return elegibilidad_resiliente.resumen()
 
 
 @app.post(

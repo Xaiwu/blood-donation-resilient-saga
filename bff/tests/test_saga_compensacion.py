@@ -7,12 +7,21 @@ import requests
 sys.path.insert(
     0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
 )
+import saga
+from resiliencia import ClienteResiliente
 from saga import (
     CUPOS_SERVICE_URL,
+    ELEGIBILIDAD_SERVICE_URL,
     REGISTRO_SERVICE_URL,
     HTTPException,
     ejecutar_saga_agendamiento,
 )
+
+
+@pytest.fixture(autouse=True)
+def resetear_resiliencia():
+    """Garantiza un Circuit Breaker y Bulkhead limpios antes de cada prueba."""
+    saga.elegibilidad_resiliente = ClienteResiliente.desde_entorno()
 
 
 @pytest.fixture
@@ -323,3 +332,39 @@ def test_fallo_anulacion_registro_detiene_compensacion_sin_liberar_cupo(
     urls_llamadas = [call[0][0] for call in mock_post.call_args_list]
     assert f"{CUPOS_SERVICE_URL}/cupos/liberar" not in urls_llamadas
     assert mock_sleep.call_count == 2
+
+
+@patch("requests.post")
+def test_circuit_breaker_abre_y_degrada_en_saga(mock_post, payload_donacion):
+    """
+    Escenario 3 de la Rúbrica (integración Saga + Circuit Breaker):
+    Tras 3 fallos consecutivos (503) de Elegibilidad, el circuito se abre y la 4ta
+    llamada degrada a PENDIENTE_VALIDACION sin invocar a Elegibilidad (fail-fast).
+    """
+    resp_cupos = MagicMock(status_code=200, content=b'{"ok": true}')
+    resp_eleg_503 = MagicMock(status_code=503, content=b'{"error": "caido"}')
+    resp_reg = MagicMock(status_code=201, content=b'{"cita_id": "c-1"}')
+    resp_reg.json.return_value = {"cita_id": "c-1"}
+
+    # 3 primeras ejecuciones: Cupos(200), Elegibilidad(503), Registro(201) -> 9 llamadas
+    # 4ta ejecución: Cupos(200), Elegibilidad(RECHAZADA por CB sin llamar), Registro(201) -> 2 llamadas
+    mock_post.side_effect = [
+        resp_cupos, resp_eleg_503, resp_reg,
+        resp_cupos, resp_eleg_503, resp_reg,
+        resp_cupos, resp_eleg_503, resp_reg,
+        resp_cupos, resp_reg,
+    ]
+
+    for i in range(4):
+        res = ejecutar_saga_agendamiento(payload_donacion, f"saga-cb-{i}")
+        assert res["estado"] == "PENDIENTE_VALIDACION"
+        assert res["elegibilidad_estado"] == "PENDIENTE_VALIDACION"
+
+    assert mock_post.call_count == 11
+    llamadas_eleg = [
+        call[0][0]
+        for call in mock_post.call_args_list
+        if call[0][0] == f"{ELEGIBILIDAD_SERVICE_URL}/elegibilidad/validar"
+    ]
+    assert len(llamadas_eleg) == 3  # la 4ta no tocó Elegibilidad
+    assert saga.elegibilidad_resiliente.circuit_breaker.metricas["rechazos_fail_fast"] == 1
