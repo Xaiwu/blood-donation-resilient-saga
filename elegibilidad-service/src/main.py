@@ -12,7 +12,27 @@ from src.caos import (
 EDAD_MINIMA = 18
 EDAD_MAXIMA = 65
 PESO_MINIMO_KG = 50.0
-RUTS_NO_APTOS = {"00.000.000-0", "00000000-0", "11.111.111-K", "11111111-K"}
+
+# Almacén de historial clínico de donantes con contraindicaciones vigentes (clave: RUT normalizado sin puntos ni guión)
+HISTORIAL_MEDICO_NO_APTOS: Dict[str, str] = {
+    "000000000": "Hemoglobina insuficiente (< 12.5 g/dL) registrada en su último control clínico.",
+    "11111111K": "Donación de sangre reciente hace menos de 3 meses (periodo de ventana vigente).",
+    "333333333": "Cirugía menor o procedimiento endoscópico en los últimos 6 meses.",
+}
+
+
+def normalizar_rut(rut: str) -> str:
+    """Normaliza un RUT eliminando espacios, puntos y guiones en mayúsculas para búsqueda uniforme."""
+    return rut.strip().upper().replace(".", "").replace("-", "")
+
+
+def consultar_motivo_inhabilitacion(rut_donante: str) -> Optional[str]:
+    """Consulta el almacén de historial médico y retorna el motivo clínico si el donante no está apto."""
+    rut_upper = rut_donante.strip().upper()
+    if "NO-APTO" in rut_upper or "NO_APTO" in rut_upper:
+        return "Donante registra contraindicación médica vigente en el historial clínico."
+    clave_rut = normalizar_rut(rut_donante)
+    return HISTORIAL_MEDICO_NO_APTOS.get(clave_rut)
 
 
 class DonanteNoAptoError(Exception):
@@ -46,11 +66,10 @@ def evaluar_elegibilidad(
         logger.info("[ELEGIBILIDAD] NO APTO (422) | rut=%s | saga=%s | motivo=%s", rut_limpio, id_saga, motivo)
         raise DonanteNoAptoError(rut_donante=rut_limpio, motivo=motivo, id_saga=id_saga)
 
-    rut_upper = rut_limpio.upper()
-    if rut_upper in RUTS_NO_APTOS or "NO-APTO" in rut_upper or "NO_APTO" in rut_upper:
-        motivo = "Donante registra contraindicación médica vigente en el historial clínico."
-        logger.info("[ELEGIBILIDAD] NO APTO (422) | rut=%s | saga=%s | motivo=%s", rut_limpio, id_saga, motivo)
-        raise DonanteNoAptoError(rut_donante=rut_limpio, motivo=motivo, id_saga=id_saga)
+    motivo_historial = consultar_motivo_inhabilitacion(rut_limpio)
+    if motivo_historial is not None:
+        logger.info("[ELEGIBILIDAD] NO APTO (422) | rut=%s | saga=%s | motivo=%s", rut_limpio, id_saga, motivo_historial)
+        raise DonanteNoAptoError(rut_donante=rut_limpio, motivo=motivo_historial, id_saga=id_saga)
 
     if edad is not None and (edad < EDAD_MINIMA or edad > EDAD_MAXIMA):
         motivo = f"Edad ({edad} años) fuera del rango clínico permitido ({EDAD_MINIMA} a {EDAD_MAXIMA} años)."
