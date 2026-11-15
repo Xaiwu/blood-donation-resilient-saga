@@ -1,3 +1,4 @@
+from typing import Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -6,7 +7,7 @@ class ReservaCupoRequest(BaseModel):
 
     model_config = ConfigDict(extra="allow", str_strip_whitespace=True)
 
-    id_saga: str = Field(..., min_length=1, description="Identificador único de la transacción SAGA")
+    id_saga: Optional[str] = Field(default=None, min_length=1, description="Identificador único de la transacción SAGA")
     rut_donante: str = Field(..., min_length=1, description="RUT del donante")
     id_jornada: str = Field(..., min_length=1, description="Identificador de la jornada")
     horario: str = Field(..., min_length=1, description="Bloque horario solicitado (ej. 09:00)")
@@ -26,7 +27,7 @@ class LiberarCupoRequest(BaseModel):
     """Payload de entrada para liberar un cupo"""
 
     model_config = ConfigDict(extra="allow", str_strip_whitespace=True)
-    id_saga: str = Field(..., min_length=1, description="ID de la SAGA a compensar")
+    id_saga: Optional[str] = Field(default=None, min_length=1, description="ID de la SAGA a compensar")
 
 class LiberarCupoResponse(BaseModel):
     """Respuesta exitosa al liberar un cupo."""

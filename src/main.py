@@ -1,11 +1,11 @@
 from contextlib import asynccontextmanager
 import sqlite3
-from typing import AsyncGenerator, Dict, List
-from fastapi import FastAPI, HTTPException, Request, Response, status
+from typing import AsyncGenerator, Dict, List, Optional
+from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 
-from src.db import (ColisionIdempotenciaError,JornadaSinCuposError,ReservaNoEncontradaError,
-    init_db, liberar_cupo, logger, obtener_cupos_donante, reservar_cupo,)
+from src.db import (ColisionIdempotenciaError, JornadaNoEncontradaError, JornadaSinCuposError,
+    ReservaNoEncontradaError, init_db, liberar_cupo, logger, obtener_cupos_donante, reservar_cupo,)
 from src.models import (CupoDonanteItem, LiberarCupoRequest, LiberarCupoResponse,
     ReservaCupoRequest, ReservaCupoResponse,)
 
@@ -24,7 +24,8 @@ async def conflicto_handler(_req: Request, exc: Exception) -> JSONResponse:
     return JSONResponse(status_code=status.HTTP_409_CONFLICT, content={"detail": str(exc)})
 
 @app.exception_handler(ReservaNoEncontradaError)
-async def no_encontrado_handler(_req: Request, exc: ReservaNoEncontradaError) -> JSONResponse:
+@app.exception_handler(JornadaNoEncontradaError)
+async def no_encontrado_handler(_req: Request, exc: Exception) -> JSONResponse:
     return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content={"detail": str(exc)})
 
 @app.exception_handler(sqlite3.OperationalError)
@@ -48,21 +49,40 @@ def healthcheck() -> Dict[str, str]:
     return {"status": "ok", "service": "cupos-service"}
 
 @app.post("/cupos/reservar", response_model=ReservaCupoResponse, status_code=status.HTTP_201_CREATED)
-def endpoint_reservar_cupo(payload: ReservaCupoRequest, response: Response) -> ReservaCupoResponse:
+def endpoint_reservar_cupo(
+    payload: ReservaCupoRequest,
+    response: Response,
+    x_saga_id: Optional[str] = Header(default=None, alias="X-Saga-ID"),
+) -> ReservaCupoResponse:
     """Reserva un cupo 201 si es nuevo, 200 si es idempotente, 409 si no hay cupos o hay colisión"""
+    saga_id = (payload.id_saga or x_saga_id or "").strip()
+    if not saga_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Debe enviar 'id_saga' en el body o en la cabecera 'X-Saga-ID'.",
+        )
     resultado = reservar_cupo(
         rut_donante=payload.rut_donante,
         id_jornada=payload.id_jornada,
         horario=payload.horario,
-        id_saga=payload.id_saga,
+        id_saga=saga_id,
     )
     response.status_code = status.HTTP_200_OK if resultado.get("idempotente") else status.HTTP_201_CREATED
     return ReservaCupoResponse(**resultado)
 
 @app.post("/cupos/liberar", response_model=LiberarCupoResponse, status_code=status.HTTP_200_OK)
-def endpoint_liberar_cupo(payload: LiberarCupoRequest) -> LiberarCupoResponse:
+def endpoint_liberar_cupo(
+    payload: Optional[LiberarCupoRequest] = None,
+    x_saga_id: Optional[str] = Header(default=None, alias="X-Saga-ID"),
+) -> LiberarCupoResponse:
     """Libera un cupo reservado de forma idempotente 200 si libera, 404 si no existe"""
-    resultado = liberar_cupo(id_saga=payload.id_saga)
+    saga_id = ((payload.id_saga if payload else None) or x_saga_id or "").strip()
+    if not saga_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Debe enviar 'id_saga' en el body o en la cabecera 'X-Saga-ID'.",
+        )
+    resultado = liberar_cupo(id_saga=saga_id)
     return LiberarCupoResponse(**resultado)
 
 @app.get("/cupos/donante/{rut}", response_model=List[CupoDonanteItem], status_code=status.HTTP_200_OK)

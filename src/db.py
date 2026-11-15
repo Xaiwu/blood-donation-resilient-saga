@@ -13,11 +13,17 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_DB_PATH = str(BASE_DIR / "data" / "cupos.db")
 SCHEMA_PATH = BASE_DIR / "db" / "schema.sql"
 
-class JornadaSinCuposError(Exception):"""Jornada sin cupos disponibles HTTP 409"""
+class JornadaSinCuposError(Exception):
+    """Jornada sin cupos disponibles HTTP 409"""
 
-class ColisionIdempotenciaError(Exception):""" ID saga o cupo ya existe con otros datos HTTP 409"""
+class ColisionIdempotenciaError(Exception):
+    """ID saga o cupo ya existe con otros datos HTTP 409"""
 
-class ReservaNoEncontradaError(Exception):"""Reserva para liberar no existe HTTP 404"""
+class ReservaNoEncontradaError(Exception):
+    """Reserva para liberar no existe HTTP 404"""
+
+class JornadaNoEncontradaError(Exception):
+    """Jornada solicitada no existe HTTP 404"""
 
 def get_connection(db_path: Optional[str] = None) -> sqlite3.Connection:
     """SQL en modo WAL y control manual de transacciones"""
@@ -72,7 +78,7 @@ def reservar_cupo(rut_donante: str, id_jornada: str, horario: str, id_saga: str,
         with immediate_transaction(db_path) as conn:
             existente = conn.execute("SELECT * FROM cupos WHERE id_saga = ?", (id_saga,)).fetchone()
 
-            # Si es una reserva nueva
+            # Si la reserva ya existe
             if existente is not None:
                 mismos_datos = (existente["rut_donante"] == rut_donante and existente["id_jornada"] == id_jornada
                     and existente["horario"] == horario)
@@ -97,13 +103,12 @@ def reservar_cupo(rut_donante: str, id_jornada: str, horario: str, id_saga: str,
                         "idempotente": True,
                     }
 
-            # Validar stock disponible en la jornada
-            conn.execute(
-                "INSERT OR IGNORE INTO jornadas (id_jornada, nombre, fecha, capacidad_total, cupos_disponibles) "
-                "VALUES (?, ?, date('now'), 10, 10)",
-                (id_jornada, f"Jornada {id_jornada}"),
-            )
+            # Validar existencia y stock disponible en la jornada
             jornada = conn.execute("SELECT * FROM jornadas WHERE id_jornada = ?", (id_jornada,)).fetchone()
+            if jornada is None:
+                logger.warning("[CUPOS] JORNADA NO ENCONTRADA (404) | jornada=%s", id_jornada)
+                raise JornadaNoEncontradaError(f"La jornada '{id_jornada}' no existe.")
+
             if jornada["cupos_disponibles"] <= 0:
                 logger.warning("[CUPOS] RECHAZO SIN CUPOS (409) | jornada=%s", id_jornada)
                 raise JornadaSinCuposError(f"La jornada '{id_jornada}' no dispone de cupos disponibles.")
@@ -157,13 +162,8 @@ def liberar_cupo(id_saga: str, db_path: Optional[str] = None) -> Dict[str, Any]:
         id_cupo_actual = reserva["id_cupo"]
         jornada_actual = reserva["id_jornada"]
 
-        # Verificar idempotencia en log_cupos o en el estado actual
-        ya_liberado = conn.execute(
-            "SELECT 1 FROM log_cupos WHERE id_cupo = ? AND accion IN ('LIBERAR', 'LIBERAR_IDEMPOTENTE') LIMIT 1",
-            (id_cupo_actual,),
-        ).fetchone()
-
-        if reserva["estado"] == "LIBERADO" or ya_liberado is not None:
+        # Verificar idempotencia mediante el estado actual protegido por BEGIN IMMEDIATE
+        if reserva["estado"] == "LIBERADO":
             _registrar_log(
                 conn, id_cupo_actual, id_saga, reserva["rut_donante"],
                 jornada_actual, reserva["horario"], "LIBERAR_IDEMPOTENTE", "Compensación ya aplicada previamente"

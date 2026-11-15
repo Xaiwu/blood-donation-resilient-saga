@@ -38,3 +38,11 @@ CREATE TABLE IF NOT EXISTS log_cupos (
     detalle TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Jornadas iniciales precargadas
+INSERT OR IGNORE INTO jornadas (id_jornada, nombre, fecha, capacidad_total, cupos_disponibles)
+VALUES
+    ('JORNADA-01', 'Campaña Hospital Regional', '2026-11-20', 10, 10),
+    ('JORNADA-02', 'Campaña Universidad de Concepción', '2026-11-21', 5, 5),
+    ('JORNADA-UNICA', 'Jornada Último Cupo Disponible', '2026-11-22', 1, 1),
+    ('JORNADA-LLENA', 'Jornada Sin Cupos Disponibles', '2026-11-23', 5, 0);
