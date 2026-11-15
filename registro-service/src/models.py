@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -7,12 +7,15 @@ class RegistrarDonacionRequest(BaseModel):
 
     model_config = ConfigDict(extra="allow", str_strip_whitespace=True)
 
-    id_saga: str = Field(..., min_length=1, description="Identificador único de la transacción SAGA")
+    id_saga: Optional[str] = Field(default=None, min_length=1, description="Identificador único de la transacción SAGA")
     rut_donante: str = Field(..., min_length=1, description="RUT del donante")
     nombre_donante: str = Field(default="Donante", min_length=1, description="Nombre completo del donante")
     id_jornada: str = Field(default="JORNADA-GENERAL", min_length=1, description="Identificador de la jornada")
     horario: str = Field(default="09:00", min_length=1, description="Bloque horario agendado")
-    estado_elegibilidad: str = Field(default="APTO", min_length=1, description="Resultado de elegibilidad médica")
+    estado_elegibilidad: Literal["APTO", "PENDIENTE_VALIDACION"] = Field(
+        default="APTO",
+        description="Resultado de elegibilidad médica ('APTO' o 'PENDIENTE_VALIDACION')",
+    )
     email_donante: Optional[str] = None
     telefono_donante: Optional[str] = None
     edad: Optional[int] = None
