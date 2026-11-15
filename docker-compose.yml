@@ -4,7 +4,6 @@
 #
 # Solo el gateway se expone al exterior (localhost:8080). El resto de los
 # servicios vive en la red "interna", que no tiene salida al host.
-# Elegibilidad se agrega aquí cuando esté en el repo.
 
 services:
   api-gateway:
@@ -54,6 +53,8 @@ services:
     depends_on:
       cupos-service:
         condition: service_healthy
+      elegibilidad-service:
+        condition: service_healthy
       registro-service:
         condition: service_healthy
     healthcheck:
@@ -73,6 +74,19 @@ services:
       - interna
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5001/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  elegibilidad-service:
+    build: ./elegibilidad-service
+    environment:
+      SIMULAR_FALLA: "${SIMULAR_FALLA:-false}"
+      LATENCIA_SEGUNDOS: "${LATENCIA_SEGUNDOS:-0}"
+    networks:
+      - interna
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5002/health', timeout=2)"]
       interval: 5s
       timeout: 3s
       retries: 10
