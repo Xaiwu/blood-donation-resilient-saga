@@ -43,20 +43,23 @@ class TestRegistroPersistence(unittest.TestCase):
         self.assertEqual(len(obtener_citas_donante("12.345.678-9", db_path=self.db_path)), 1)
 
     def test_colision_idempotencia_409(self) -> None:
-        """Verifica que reutilizar un id_saga con otro donante o elegibilidad lanza ColisionIdempotenciaError (409)."""
+        """Verifica que reutilizar un id_saga con otro donante o jornada lanza ColisionIdempotenciaError (409)."""
         registrar_donacion("saga-col", "12.345.678-9", "Ana", "JORNADA-01", "09:00", "APTO", self.db_path)
         with self.assertRaises(ColisionIdempotenciaError):
             registrar_donacion("saga-col", "99.999.999-9", "Ana", "JORNADA-01", "09:00", "APTO", self.db_path)
 
         with self.assertRaises(ColisionIdempotenciaError):
-            registrar_donacion("saga-col", "12.345.678-9", "Ana", "JORNADA-01", "09:00", "PENDIENTE_VALIDACION", self.db_path)
+            registrar_donacion("saga-col", "12.345.678-9", "Ana", "JORNADA-02", "09:00", "APTO", self.db_path)
 
-    def test_degradacion_pendiente_validacion(self) -> None:
-        """Verifica el estado PENDIENTE_VALIDACION cuando Elegibilidad degrada."""
+    def test_degradacion_pendiente_validacion_y_rechazo_invalido(self) -> None:
+        """Verifica el estado PENDIENTE_VALIDACION cuando Elegibilidad degrada y ValueError ante estado inválido."""
         r_deg = registrar_donacion(
             "saga-deg", "12.345.678-9", "Ana", "JORNADA-01", "10:30", "PENDIENTE_VALIDACION", self.db_path
         )
         self.assertEqual(r_deg["estado"], "PENDIENTE_VALIDACION")
+
+        with self.assertRaises(ValueError):
+            registrar_donacion("saga-inv", "12.345.678-9", "Ana", "JORNADA-01", "11:00", "NO_APTO", self.db_path)
 
     def test_anulacion_idempotente_y_no_encontrada_404(self) -> None:
         """Verifica que anular cambia el estado una única vez y lanza 404 si la SAGA no existe."""

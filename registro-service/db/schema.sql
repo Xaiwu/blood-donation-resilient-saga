@@ -26,5 +26,6 @@ CREATE TABLE IF NOT EXISTS log_registro (
     rut_donante TEXT NOT NULL,
     accion TEXT NOT NULL CHECK (accion IN ('REGISTRAR', 'REGISTRAR_IDEMPOTENTE', 'ANULAR', 'ANULAR_IDEMPOTENTE')),
     detalle TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (id_cita) REFERENCES citas_donacion(id_cita)
 );

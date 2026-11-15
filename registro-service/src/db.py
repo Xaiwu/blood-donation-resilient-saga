@@ -79,6 +79,9 @@ def registrar_donacion(
     db_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Registra una cita médica de donación de forma atómica e idempotente."""
+    if estado_elegibilidad not in ("APTO", "PENDIENTE_VALIDACION"):
+        raise ValueError(f"Estado de elegibilidad inválido: '{estado_elegibilidad}'.")
+
     estado_cita = "PENDIENTE_VALIDACION" if estado_elegibilidad == "PENDIENTE_VALIDACION" else "CONFIRMADA"
 
     try:
@@ -90,7 +93,6 @@ def registrar_donacion(
                     existente["rut_donante"] == rut_donante
                     and existente["id_jornada"] == id_jornada
                     and existente["horario"] == horario
-                    and existente["estado_elegibilidad"] == estado_elegibilidad
                 )
                 if not mismos_datos:
                     logger.warning("[REGISTRO] COLISION IDEMPOTENCIA (409) | id_saga=%s", id_saga)
@@ -137,13 +139,16 @@ def registrar_donacion(
             }
     except sqlite3.IntegrityError as exc:
         logger.warning("[REGISTRO] Violación de integridad SQLite (409): %s", exc)
-        raise ColisionIdempotenciaError("Conflicto de integridad en datos de la cita o SAGA.") from exc
+        raise ColisionIdempotenciaError("Conflicto de integridad en identificador de cita o SAGA.") from exc
 
 
 def anular_donacion(id_saga: str, db_path: Optional[str] = None) -> Dict[str, Any]:
     """Anula una cita médica de forma idempotente como compensación del Paso 3."""
     with immediate_transaction(db_path) as conn:
-        cita = conn.execute("SELECT * FROM citas_donacion WHERE id_saga = ?", (id_saga,)).fetchone()
+        cita = conn.execute(
+            "SELECT id_cita, rut_donante, estado FROM citas_donacion WHERE id_saga = ?",
+            (id_saga,),
+        ).fetchone()
         if cita is None:
             logger.warning("[REGISTRO] CITA NO ENCONTRADA PARA ANULAR (404) | saga=%s", id_saga)
             raise CitaNoEncontradaError("No se encontró ninguna cita registrada para el id_saga indicado.")
@@ -189,7 +194,7 @@ def obtener_citas_donante(rut_donante: str, db_path: Optional[str] = None) -> Li
         rows = conn.execute(
             "SELECT id_cita AS cita_id, rut_donante, nombre_donante, id_jornada, "
             "horario, estado_elegibilidad, estado FROM citas_donacion "
-            "WHERE rut_donante = ? AND estado != 'ANULADA' ORDER BY created_at DESC",
+            "WHERE rut_donante = ? AND estado != 'ANULADA' ORDER BY created_at DESC, rowid DESC",
             (rut_donante,),
         ).fetchall()
         return [dict(row) for row in rows]
