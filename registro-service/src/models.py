@@ -13,14 +13,8 @@ class RegistrarDonacionRequest(BaseModel):
     id_jornada: str = Field(default="JORNADA-GENERAL", min_length=1, description="Identificador de la jornada")
     horario: str = Field(default="09:00", min_length=1, description="Bloque horario agendado")
     estado_elegibilidad: Literal["APTO", "PENDIENTE_VALIDACION"] = Field(
-        default="APTO",
-        description="Resultado de elegibilidad médica ('APTO' o 'PENDIENTE_VALIDACION')",
+        default="APTO", description="Resultado de elegibilidad médica ('APTO' o 'PENDIENTE_VALIDACION')"
     )
-    email_donante: Optional[str] = None
-    telefono_donante: Optional[str] = None
-    edad: Optional[int] = None
-    peso_kg: Optional[float] = None
-    grupo_sanguineo: Optional[str] = None
 
 
 class RegistrarDonacionResponse(BaseModel):

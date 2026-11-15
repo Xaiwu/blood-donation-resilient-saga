@@ -61,10 +61,7 @@ async def elegibilidad_invalida_handler(_req: Request, exc: ElegibilidadInvalida
 @app.exception_handler(FallaSimuladaRegistroError)
 async def falla_simulada_handler(_req: Request, exc: FallaSimuladaRegistroError) -> JSONResponse:
     logger.error("[REGISTRO] Fallo inducido en Paso 3 (500): %s", exc)
-    return JSONResponse(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"detail": str(exc)},
-    )
+    return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={"detail": str(exc)})
 
 
 @app.exception_handler(sqlite3.OperationalError)
@@ -87,11 +84,7 @@ async def sqlite_error_handler(_req: Request, exc: sqlite3.Error) -> JSONRespons
 
 @app.get("/health", status_code=status.HTTP_200_OK)
 def healthcheck() -> Dict[str, Any]:
-    return {
-        "status": "ok",
-        "service": "registro-service",
-        "simular_falla": ESTADO_CAOS["simular_falla"],
-    }
+    return {"status": "ok", "service": "registro-service", "simular_falla": ESTADO_CAOS["simular_falla"]}
 
 
 @app.post("/registro/config/falla", status_code=status.HTTP_200_OK)
@@ -128,21 +121,12 @@ def endpoint_registrar_donacion(
         id_jornada=payload.id_jornada,
         horario=payload.horario,
         estado_elegibilidad=payload.estado_elegibilidad,
-        email_donante=payload.email_donante,
-        telefono_donante=payload.telefono_donante,
-        edad=payload.edad,
-        peso_kg=payload.peso_kg,
-        grupo_sanguineo=payload.grupo_sanguineo,
     )
     response.status_code = status.HTTP_200_OK if resultado.get("idempotente") else status.HTTP_201_CREATED
     return RegistrarDonacionResponse(**resultado)
 
 
-@app.post(
-    "/registro/donaciones/{id_saga}/anular",
-    response_model=AnularDonacionResponse,
-    status_code=status.HTTP_200_OK,
-)
+@app.post("/registro/donaciones/{id_saga}/anular", response_model=AnularDonacionResponse, status_code=status.HTTP_200_OK)
 def endpoint_anular_donacion(id_saga: str) -> AnularDonacionResponse:
     """Anula de forma idempotente una cita médica asociada a un id_saga (200 si anula, 404 si no existe)."""
     if not id_saga.strip():
@@ -150,8 +134,7 @@ def endpoint_anular_donacion(id_saga: str) -> AnularDonacionResponse:
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="El parámetro 'id_saga' no puede estar vacío.",
         )
-    resultado = anular_donacion(id_saga=id_saga.strip())
-    return AnularDonacionResponse(**resultado)
+    return AnularDonacionResponse(**anular_donacion(id_saga=id_saga.strip()))
 
 
 @app.get("/registro/donantes/{rut}", response_model=List[CitaDonanteItem], status_code=status.HTTP_200_OK)
