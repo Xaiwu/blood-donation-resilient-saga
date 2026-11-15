@@ -13,6 +13,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_DB_PATH = str(BASE_DIR / "data" / "registro.db")
 SCHEMA_PATH = BASE_DIR / "db" / "schema.sql"
 
+ESTADOS_ELEGIBILIDAD_VALIDOS = ("APTO", "PENDIENTE_VALIDACION")
+
 
 class ColisionIdempotenciaError(Exception):
     """ID de SAGA ya existe con datos distintos (HTTP 409)."""
@@ -20,6 +22,10 @@ class ColisionIdempotenciaError(Exception):
 
 class CitaNoEncontradaError(Exception):
     """La cita solicitada para anular no existe (HTTP 404)."""
+
+
+class ElegibilidadInvalidaError(Exception):
+    """El estado de elegibilidad no permite registrar la donación (HTTP 422)."""
 
 
 class FallaSimuladaRegistroError(Exception):
@@ -97,6 +103,14 @@ def registrar_donacion(
     db_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Registra una cita médica de donación de forma atómica e idempotente."""
+    if estado_elegibilidad not in ESTADOS_ELEGIBILIDAD_VALIDOS:
+        logger.warning("[REGISTRO] ELEGIBILIDAD INVALIDA (422) | estado=%s | saga=%s", estado_elegibilidad, id_saga)
+        raise ElegibilidadInvalidaError(
+            f"No se puede registrar una cita con estado_elegibilidad='{estado_elegibilidad}'."
+        )
+
+    estado_cita = "PENDIENTE_VALIDACION" if estado_elegibilidad == "PENDIENTE_VALIDACION" else "CONFIRMADA"
+
     try:
         with immediate_transaction(db_path) as conn:
             existente = conn.execute(
@@ -104,11 +118,13 @@ def registrar_donacion(
                 (id_saga,),
             ).fetchone()
 
+            # Si la cita ya existe para este id_saga
             if existente is not None:
                 mismos_datos = (
                     existente["rut_donante"] == rut_donante
                     and existente["id_jornada"] == id_jornada
                     and existente["horario"] == horario
+                    and existente["estado_elegibilidad"] == estado_elegibilidad
                 )
                 if not mismos_datos:
                     logger.warning("[REGISTRO] COLISION IDEMPOTENCIA (409) | id_saga=%s", id_saga)
@@ -145,9 +161,21 @@ def registrar_donacion(
 
                 cita_id = existente["id_cita"]
                 conn.execute(
-                    "UPDATE citas_donacion SET estado = 'CONFIRMADA', estado_elegibilidad = ?, "
-                    "updated_at = datetime('now') WHERE id_cita = ?",
-                    (estado_elegibilidad, cita_id),
+                    "UPDATE citas_donacion SET nombre_donante = ?, email_donante = ?, "
+                    "telefono_donante = ?, edad = ?, peso_kg = ?, grupo_sanguineo = ?, "
+                    "estado_elegibilidad = ?, estado = ?, updated_at = datetime('now') "
+                    "WHERE id_cita = ?",
+                    (
+                        nombre_donante,
+                        email_donante,
+                        telefono_donante,
+                        edad,
+                        peso_kg,
+                        grupo_sanguineo,
+                        estado_elegibilidad,
+                        estado_cita,
+                        cita_id,
+                    ),
                 )
             else:
                 cita_id = f"cita-{uuid.uuid4().hex[:12]}"
@@ -156,7 +184,7 @@ def registrar_donacion(
                     "id_cita, id_saga, rut_donante, nombre_donante, id_jornada, horario, "
                     "email_donante, telefono_donante, edad, peso_kg, grupo_sanguineo, "
                     "estado_elegibilidad, estado"
-                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'CONFIRMADA')",
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         cita_id,
                         id_saga,
@@ -170,6 +198,7 @@ def registrar_donacion(
                         peso_kg,
                         grupo_sanguineo,
                         estado_elegibilidad,
+                        estado_cita,
                     ),
                 )
 
@@ -179,13 +208,13 @@ def registrar_donacion(
                 id_saga,
                 rut_donante,
                 "REGISTRAR",
-                f"Cita médica confirmada (elegibilidad={estado_elegibilidad})",
+                f"Cita médica registrada (estado={estado_cita}, elegibilidad={estado_elegibilidad})",
             )
             logger.info(
-                "[REGISTRO] CITA CREADA (201) | cita_id=%s | saga=%s | rut=%s",
+                "[REGISTRO] CITA CREADA (201) | cita_id=%s | saga=%s | estado=%s",
                 cita_id,
                 id_saga,
-                rut_donante,
+                estado_cita,
             )
             return {
                 "ok": True,
@@ -196,7 +225,7 @@ def registrar_donacion(
                 "id_jornada": id_jornada,
                 "horario": horario,
                 "estado_elegibilidad": estado_elegibilidad,
-                "estado": "CONFIRMADA",
+                "estado": estado_cita,
                 "idempotente": False,
             }
     except sqlite3.IntegrityError as exc:
@@ -218,12 +247,8 @@ def anular_donacion(id_saga: str, db_path: Optional[str] = None) -> Dict[str, An
         id_cita_actual = cita["id_cita"]
         rut_actual = cita["rut_donante"]
 
-        ya_anulada = conn.execute(
-            "SELECT 1 FROM log_registro WHERE id_cita = ? AND accion IN ('ANULAR', 'ANULAR_IDEMPOTENTE') LIMIT 1",
-            (id_cita_actual,),
-        ).fetchone()
-
-        if cita["estado"] == "ANULADA" or ya_anulada is not None:
+        # Verificar idempotencia mediante el estado actual protegido por BEGIN IMMEDIATE
+        if cita["estado"] == "ANULADA":
             _registrar_log(
                 conn,
                 id_cita_actual,

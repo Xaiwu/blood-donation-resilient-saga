@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS citas_donacion (
     edad INTEGER,
     peso_kg REAL,
     grupo_sanguineo TEXT,
-    estado_elegibilidad TEXT NOT NULL DEFAULT 'APTO',
+    estado_elegibilidad TEXT NOT NULL DEFAULT 'APTO' CHECK (estado_elegibilidad IN ('APTO', 'PENDIENTE_VALIDACION')),
     estado TEXT NOT NULL CHECK (estado IN ('CONFIRMADA', 'PENDIENTE_VALIDACION', 'ANULADA')),
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))

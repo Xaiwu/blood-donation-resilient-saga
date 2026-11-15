@@ -13,12 +13,10 @@ from src.models import ( AnularDonacionResponse,CitaDonanteItem,ConfigFallaReque
 
 ESTADO_CAOS: Dict[str, bool] = {"simular_falla": os.getenv("SIMULAR_FALLA", "false").lower() in ("true", "1", "yes"),}
 
-
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     init_db()
     yield
-
 
 app = FastAPI(
     title="Registro Service",
@@ -27,16 +25,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-
 @app.exception_handler(ColisionIdempotenciaError)
 async def conflicto_handler(_req: Request, exc: ColisionIdempotenciaError) -> JSONResponse:
     return JSONResponse(status_code=status.HTTP_409_CONFLICT, content={"detail": str(exc)})
 
-
 @app.exception_handler(CitaNoEncontradaError)
 async def no_encontrado_handler(_req: Request, exc: CitaNoEncontradaError) -> JSONResponse:
     return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content={"detail": str(exc)})
-
 
 @app.exception_handler(FallaSimuladaRegistroError)
 async def falla_simulada_handler(_req: Request, exc: FallaSimuladaRegistroError) -> JSONResponse:
@@ -46,7 +41,6 @@ async def falla_simulada_handler(_req: Request, exc: FallaSimuladaRegistroError)
         content={"detail": str(exc)},
     )
 
-
 @app.exception_handler(sqlite3.OperationalError)
 async def sqlite_ocupado_handler(_req: Request, exc: sqlite3.OperationalError) -> JSONResponse:
     logger.error("[REGISTRO] Bloqueo temporal de SQLite (503): %s", exc)
@@ -54,7 +48,6 @@ async def sqlite_ocupado_handler(_req: Request, exc: sqlite3.OperationalError) -
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         content={"detail": "Base de datos temporalmente ocupada por alta concurrencia. Reintente."},
     )
-
 
 @app.exception_handler(sqlite3.Error)
 async def sqlite_error_handler(_req: Request, exc: sqlite3.Error) -> JSONResponse:
@@ -64,7 +57,6 @@ async def sqlite_error_handler(_req: Request, exc: sqlite3.Error) -> JSONRespons
         content={"detail": "Error interno de persistencia en el servicio de registro."},
     )
 
-
 @app.get("/health", status_code=status.HTTP_200_OK)
 def healthcheck() -> Dict[str, Any]:
     return {
@@ -73,14 +65,12 @@ def healthcheck() -> Dict[str, Any]:
         "simular_falla": ESTADO_CAOS["simular_falla"],
     }
 
-
 @app.post("/registro/config/falla", status_code=status.HTTP_200_OK)
 def configurar_falla(payload: ConfigFallaRequest) -> Dict[str, Any]:
     """Activa o desactiva la simulación de fallo HTTP 500 para demostrar el Escenario 2."""
     ESTADO_CAOS["simular_falla"] = payload.fallar
     logger.warning("[REGISTRO] Simulación de falla configurada en: %s", payload.fallar)
     return {"ok": True, "simular_falla": ESTADO_CAOS["simular_falla"]}
-
 
 @app.post("/registro/donaciones", response_model=RegistrarDonacionResponse, status_code=status.HTTP_201_CREATED)
 def endpoint_registrar_donacion(
@@ -108,7 +98,6 @@ def endpoint_registrar_donacion(
     response.status_code = status.HTTP_200_OK if resultado.get("idempotente") else status.HTTP_201_CREATED
     return RegistrarDonacionResponse(**resultado)
 
-
 @app.post(
     "/registro/donaciones/{id_saga}/anular",
     response_model=AnularDonacionResponse,
@@ -123,7 +112,6 @@ def endpoint_anular_donacion(id_saga: str) -> AnularDonacionResponse:
         )
     resultado = anular_donacion(id_saga=id_saga.strip())
     return AnularDonacionResponse(**resultado)
-
 
 @app.get("/registro/donantes/{rut}", response_model=List[CitaDonanteItem], status_code=status.HTTP_200_OK)
 def endpoint_citas_por_donante(rut: str) -> List[CitaDonanteItem]:
