@@ -1,10 +1,12 @@
 """Pruebas unitarias de persistencia, idempotencia y compensación para cupos-service."""
 
+from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
 import shutil
 import sys
 import tempfile
+import threading
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -114,6 +116,32 @@ class TestCuposPersistence(unittest.TestCase):
         self.assertEqual(l2["estado"], "LIBERADO")
         self.assertEqual(self._stock_disponible("JORNADA-01"), 10)
         self.assertEqual(len(obtener_cupos_donante("12.345.678-9", db_path=self.db_path)), 0)
+
+    def test_concurrencia_jornada_unica(self) -> None:
+        """Verifica con solicitudes simultáneas sobre JORNADA-UNICA que solo 1 gana el cupo y el stock no queda negativo."""
+        total_hilos = 8
+        barrera = threading.Barrier(total_hilos)
+
+        def intentar_reserva(indice: int) -> str:
+            barrera.wait()
+            try:
+                reservar_cupo(
+                    rut_donante=f"10.000.00{indice}-{indice}",
+                    id_jornada="JORNADA-UNICA",
+                    horario="09:00",
+                    id_saga=f"saga-conc-{indice}",
+                    db_path=self.db_path,
+                )
+                return "OK"
+            except JornadaSinCuposError:
+                return "SIN_CUPOS"
+
+        with ThreadPoolExecutor(max_workers=total_hilos) as pool:
+            resultados = list(pool.map(intentar_reserva, range(total_hilos)))
+
+        self.assertEqual(resultados.count("OK"), 1)
+        self.assertEqual(resultados.count("SIN_CUPOS"), total_hilos - 1)
+        self.assertEqual(self._stock_disponible("JORNADA-UNICA"), 0)
 
 
 if __name__ == "__main__":
