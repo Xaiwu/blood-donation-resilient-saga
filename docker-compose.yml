@@ -4,7 +4,7 @@
 #
 # Solo el gateway se expone al exterior (localhost:8080). El resto de los
 # servicios vive en la red "interna", que no tiene salida al host.
-# Cupos, Registro y Elegibilidad se agregan aquí cuando estén en el repo.
+# Registro y Elegibilidad se agregan aquí cuando estén en el repo.
 
 services:
   api-gateway:
@@ -51,8 +51,26 @@ services:
       BULKHEAD_MAX_ESPERA_S: "${BULKHEAD_MAX_ESPERA_S:-0}"
     networks:
       - interna
+    depends_on:
+      cupos-service:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  cupos-service:
+    build: ./cupos-service
+    environment:
+      DATABASE_PATH: "/app/data/cupos.db"
+    volumes:
+      # Base de datos propia del servicio (database-per-service)
+      - cupos-data:/app/data
+    networks:
+      - interna
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5001/health', timeout=2)"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -61,3 +79,6 @@ networks:
   perimetral:
   interna:
     internal: true
+
+volumes:
+  cupos-data:
