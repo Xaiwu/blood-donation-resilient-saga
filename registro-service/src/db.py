@@ -135,7 +135,7 @@ def registrar_donacion(
                 "idempotente": False,
             }
     except sqlite3.IntegrityError as exc:
-        if "UNIQUE" in str(exc).upper():
+        if exc.sqlite_errorname in ("SQLITE_CONSTRAINT_UNIQUE", "SQLITE_CONSTRAINT_PRIMARYKEY"):
             logger.warning("[REGISTRO] Violación UNIQUE SQLite (409): %s", exc)
             raise ColisionIdempotenciaError("Conflicto de integridad en identificador de cita o SAGA.") from exc
         logger.error("[REGISTRO] Violación de restricción SQLite (500): %s", exc)
