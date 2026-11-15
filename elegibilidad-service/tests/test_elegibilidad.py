@@ -8,14 +8,13 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.caos import (
-    DonanteNoAptoError,
     FallaSimuladaError,
     configurar_falla,
     configurar_latencia,
-    evaluar_elegibilidad,
     obtener_estado_caos,
     resetear_caos,
 )
+from src.main import DonanteNoAptoError, evaluar_elegibilidad
 
 try:
     from fastapi.testclient import TestClient

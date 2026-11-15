@@ -7,21 +7,6 @@ from typing import Any, Dict, Optional
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 logger = logging.getLogger("elegibilidad-service")
 
-EDAD_MINIMA = 18
-EDAD_MAXIMA = 65
-PESO_MINIMO_KG = 50.0
-RUTS_NO_APTOS = {"00.000.000-0", "00000000-0", "11.111.111-K", "11111111-K"}
-
-
-class DonanteNoAptoError(Exception):
-    """El donante no cumple los criterios clínicos para donar sangre (HTTP 422)."""
-
-    def __init__(self, rut_donante: str, motivo: str, id_saga: Optional[str] = None):
-        super().__init__(motivo)
-        self.rut_donante = rut_donante
-        self.motivo = motivo
-        self.id_saga = id_saga
-
 
 class FallaSimuladaError(Exception):
     """Excepción lanzada cuando el simulador de caos tiene activa la caída del servicio (HTTP 5xx)."""
@@ -138,57 +123,14 @@ def aplicar_caos(id_saga: Optional[str] = None) -> None:
     _caos.aplicar(id_saga=id_saga)
 
 
-def evaluar_elegibilidad(
-    rut_donante: str,
-    edad: Optional[int] = None,
-    peso_kg: Optional[float] = None,
-    apto: Optional[bool] = None,
-    elegible: Optional[bool] = None,
-    id_saga: Optional[str] = None,
-) -> Dict[str, Any]:
-    """
-    Evalúa la aptitud clínica de un donante aplicando primero las reglas de caos activas.
-    Si el donante no cumple los requisitos médicos, lanza DonanteNoAptoError (HTTP 422).
-    """
-    aplicar_caos(id_saga=id_saga)
-
-    rut_limpio = rut_donante.strip()
-
-    if apto is False or elegible is False:
-        motivo = "Donante marcado explícitamente como no apto en la evaluación clínica."
-        logger.info("[ELEGIBILIDAD] NO APTO (422) | rut=%s | saga=%s | motivo=%s", rut_limpio, id_saga, motivo)
-        raise DonanteNoAptoError(rut_donante=rut_limpio, motivo=motivo, id_saga=id_saga)
-
-    rut_upper = rut_limpio.upper()
-    if rut_upper in RUTS_NO_APTOS or "NO-APTO" in rut_upper or "NO_APTO" in rut_upper:
-        motivo = "Donante registra contraindicación médica vigente en el historial clínico."
-        logger.info("[ELEGIBILIDAD] NO APTO (422) | rut=%s | saga=%s | motivo=%s", rut_limpio, id_saga, motivo)
-        raise DonanteNoAptoError(rut_donante=rut_limpio, motivo=motivo, id_saga=id_saga)
-
-    if edad is not None and (edad < EDAD_MINIMA or edad > EDAD_MAXIMA):
-        motivo = f"Edad ({edad} años) fuera del rango clínico permitido ({EDAD_MINIMA} a {EDAD_MAXIMA} años)."
-        logger.info("[ELEGIBILIDAD] NO APTO (422) | rut=%s | saga=%s | motivo=%s", rut_limpio, id_saga, motivo)
-        raise DonanteNoAptoError(rut_donante=rut_limpio, motivo=motivo, id_saga=id_saga)
-
-    if peso_kg is not None and peso_kg < PESO_MINIMO_KG:
-        motivo = f"Peso corporal ({peso_kg} kg) inferior al mínimo clínico requerido ({PESO_MINIMO_KG} kg)."
-        logger.info("[ELEGIBILIDAD] NO APTO (422) | rut=%s | saga=%s | motivo=%s", rut_limpio, id_saga, motivo)
-        raise DonanteNoAptoError(rut_donante=rut_limpio, motivo=motivo, id_saga=id_saga)
-
-    logger.info("[ELEGIBILIDAD] DONANTE APTO (200) | rut=%s | saga=%s", rut_limpio, id_saga or "N/A")
-    return {
-        "ok": True,
-        "apto": True,
-        "elegible": True,
-        "rut_donante": rut_limpio,
-        "id_saga": id_saga,
-        "estado": "APTO",
-        "motivo": "Donante cumple con los requisitos médicos de elegibilidad.",
-    }
-
-
 try:
     from fastapi import APIRouter, HTTPException, Query, status
+    FASTAPI_INSTALADO = True
+except ImportError:
+    FASTAPI_INSTALADO = False
+    router = None  # type: ignore
+
+if FASTAPI_INSTALADO:
     from src.models import ConfigurarFallaRequest, ConfigurarLatenciaRequest, EstadoCaosResponse
 
     router = APIRouter(tags=["Inyección de Caos"])
@@ -240,6 +182,3 @@ try:
     def endpoint_resetear_caos() -> EstadoCaosResponse:
         """Restablece el servicio a su operación normal sin latencia ni fallas."""
         return EstadoCaosResponse(**resetear_caos())
-
-except ImportError:
-    router = None  # type: ignore
