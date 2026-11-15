@@ -4,7 +4,7 @@
 #
 # Solo el gateway se expone al exterior (localhost:8080). El resto de los
 # servicios vive en la red "interna", que no tiene salida al host.
-# Registro y Elegibilidad se agregan aquí cuando estén en el repo.
+# Elegibilidad se agrega aquí cuando esté en el repo.
 
 services:
   api-gateway:
@@ -54,6 +54,8 @@ services:
     depends_on:
       cupos-service:
         condition: service_healthy
+      registro-service:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health', timeout=2)"]
       interval: 5s
@@ -75,6 +77,21 @@ services:
       timeout: 3s
       retries: 10
 
+  registro-service:
+    build: ./registro-service
+    environment:
+      DATABASE_PATH: "/app/data/registro.db"
+    volumes:
+      # Base de datos propia del servicio (database-per-service)
+      - registro-data:/app/data
+    networks:
+      - interna
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5003/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
 networks:
   perimetral:
   interna:
@@ -82,3 +99,4 @@ networks:
 
 volumes:
   cupos-data:
+  registro-data:
