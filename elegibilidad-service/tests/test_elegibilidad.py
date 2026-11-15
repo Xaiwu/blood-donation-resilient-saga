@@ -1,7 +1,9 @@
 """Pruebas unitarias de validación clínica e inyección de caos para elegibilidad-service."""
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import sys
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -9,12 +11,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.caos import (
     FallaSimuladaError,
+    _parse_codigo_falla,
+    _parse_float,
     configurar_falla,
     configurar_latencia,
     obtener_estado_caos,
     resetear_caos,
 )
-from src.main import DonanteNoAptoError, evaluar_elegibilidad
+from src.main import DonanteNoAptoError, evaluar_elegibilidad, normalizar_rut
 
 try:
     from fastapi.testclient import TestClient
@@ -26,7 +30,7 @@ except ImportError:
 
 
 class TestElegibilidadLogicaYCaos(unittest.TestCase):
-    """Pruebas sobre la lógica de negocio y el simulador de caos."""
+    """Pruebas sobre la lógica de negocio, historial médico y simulador de caos."""
 
     def setUp(self) -> None:
         resetear_caos()
@@ -57,13 +61,43 @@ class TestElegibilidadLogicaYCaos(unittest.TestCase):
         with self.assertRaises(DonanteNoAptoError):
             evaluar_elegibilidad("12.345.678-9", edad=30, peso_kg=49.5)
 
-    def test_rechazo_por_rut_inhabilitado_o_flag_explicito(self) -> None:
-        """Verifica rechazo clínico por RUT en lista negra o flag apto=False."""
-        with self.assertRaises(DonanteNoAptoError):
+    def test_rechazo_por_historial_medico_rut_normalizado_y_flags(self) -> None:
+        """Verifica normalización de RUTs en el almacén médico y flags explícitos apto/elegible=False."""
+        self.assertEqual(normalizar_rut(" 11.111.111-k "), "11111111K")
+
+        with self.assertRaises(DonanteNoAptoError) as ctx_hemo:
             evaluar_elegibilidad("00.000.000-0", edad=30, peso_kg=70.0)
+        self.assertIn("Hemoglobina", ctx_hemo.exception.motivo)
+
+        with self.assertRaises(DonanteNoAptoError) as ctx_ventana:
+            evaluar_elegibilidad("11111111-k", edad=30, peso_kg=70.0)
+        self.assertIn("Donación de sangre reciente", ctx_ventana.exception.motivo)
+
+        with self.assertRaises(DonanteNoAptoError) as ctx_cirugia:
+            evaluar_elegibilidad("33.333.333-3", edad=30, peso_kg=70.0)
+        self.assertIn("Cirugía menor", ctx_cirugia.exception.motivo)
 
         with self.assertRaises(DonanteNoAptoError):
             evaluar_elegibilidad("12.345.678-9", edad=30, peso_kg=70.0, apto=False)
+
+        with self.assertRaises(DonanteNoAptoError):
+            evaluar_elegibilidad("12.345.678-9", edad=30, peso_kg=70.0, elegible=False)
+
+    def test_validacion_limites_caos_y_parsers_defensivos(self) -> None:
+        """Verifica que latencias fuera de [0, 60], NaN/inf o códigos HTTP no 5xx sean rechazados."""
+        for lat_invalida in (-0.5, 60.1, float("inf"), float("nan")):
+            with self.assertRaises(ValueError):
+                configurar_latencia(lat_invalida)
+
+        for codigo_invalido in (200, 404, 499, 600):
+            with self.assertRaises(ValueError):
+                configurar_falla(True, codigo_falla=codigo_invalido)
+
+        self.assertEqual(_parse_codigo_falla("", 500), 500)
+        self.assertEqual(_parse_codigo_falla("200", 500), 500)
+        self.assertEqual(_parse_codigo_falla("503", 500), 503)
+        self.assertEqual(_parse_float("invalido", 0.0), 0.0)
+        self.assertEqual(_parse_float("999", 0.0), 60.0)
 
     @patch("src.caos.time.sleep")
     def test_inyeccion_latencia_y_falla_simulada(self, mock_sleep) -> None:
@@ -84,6 +118,28 @@ class TestElegibilidadLogicaYCaos(unittest.TestCase):
         estado = obtener_estado_caos()
         self.assertFalse(estado["simular_falla"])
         self.assertEqual(estado["latencia_segundos"], 0.0)
+
+    def test_concurrencia_evaluacion_simultanea(self) -> None:
+        """Verifica con múltiples hilos simultáneos que la evaluación y lectura de caos sea thread-safe."""
+        total_hilos = 8
+        barrera = threading.Barrier(total_hilos)
+
+        def evaluar_concurrente(indice: int) -> str:
+            barrera.wait()
+            if indice % 2 == 0:
+                res = evaluar_elegibilidad(f"12.345.67{indice}-9", edad=30, peso_kg=70.0, id_saga=f"saga-c-{indice}")
+                return res["estado"]
+            try:
+                evaluar_elegibilidad("00.000.000-0", edad=30, peso_kg=70.0, id_saga=f"saga-c-{indice}")
+                return "APTO"
+            except DonanteNoAptoError:
+                return "NO_APTO"
+
+        with ThreadPoolExecutor(max_workers=total_hilos) as pool:
+            resultados = list(pool.map(evaluar_concurrente, range(total_hilos)))
+
+        self.assertEqual(resultados.count("APTO"), 4)
+        self.assertEqual(resultados.count("NO_APTO"), 4)
 
 
 @unittest.skipUnless(FASTAPI_DISPONIBLE, "FastAPI/TestClient no instalado en el entorno local")
@@ -118,12 +174,16 @@ class TestElegibilidadEndpoints(unittest.TestCase):
         self.assertEqual(resp_no_apto.json()["estado"], "NO_APTO")
 
     @patch("src.caos.time.sleep")
-    def test_endpoints_caos_latencia_falla_y_reset(self, mock_sleep) -> None:
-        """Verifica los endpoints /elegibilidad/config/* y /config/* para la demostración ABET 6."""
+    def test_endpoints_caos_latencia_falla_query_params_y_rechazos_422(self, mock_sleep) -> None:
+        """Verifica los endpoints /elegibilidad/config/* y /config/*, query params y rechazos 422."""
         # 1. Configurar latencia en /elegibilidad/config/latencia
         r_lat = self.client.post("/elegibilidad/config/latencia", json={"latencia_segundos": 5.0})
         self.assertEqual(r_lat.status_code, 200)
         self.assertEqual(r_lat.json()["latencia_segundos"], 5.0)
+
+        # Rechazo 422 si latencia es negativa o > 60s
+        r_lat_inv = self.client.post("/config/latencia", json={"latencia_segundos": -2.0})
+        self.assertEqual(r_lat_inv.status_code, 422)
 
         r_val = self.client.post("/elegibilidad/validar", json={"rut_donante": "12.345.678-9"})
         self.assertEqual(r_val.status_code, 200)
@@ -133,6 +193,10 @@ class TestElegibilidadEndpoints(unittest.TestCase):
         r_falla = self.client.post("/config/falla", json={"simular_falla": True})
         self.assertEqual(r_falla.status_code, 200)
         self.assertTrue(r_falla.json()["simular_falla"])
+
+        # Rechazo 422 si el código de falla no es 5xx
+        r_falla_inv = self.client.post("/config/falla", json={"simular_falla": True, "codigo_falla": 400})
+        self.assertEqual(r_falla_inv.status_code, 422)
 
         r_caido = self.client.post("/elegibilidad/validar", json={"rut_donante": "12.345.678-9"})
         self.assertEqual(r_caido.status_code, 500)
