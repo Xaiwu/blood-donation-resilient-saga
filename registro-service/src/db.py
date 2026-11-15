@@ -22,14 +22,6 @@ class CitaNoEncontradaError(Exception):
     """La cita solicitada para anular no existe (HTTP 404)."""
 
 
-class ElegibilidadInvalidaError(Exception):
-    """El estado de elegibilidad no permite registrar la donación (HTTP 422)."""
-
-
-class FallaSimuladaRegistroError(Exception):
-    """Fallo inducido en el Paso 3 para demostrar compensación inversa SAGA (HTTP 500)."""
-
-
 def get_connection(db_path: Optional[str] = None) -> sqlite3.Connection:
     """Abre conexión SQLite en modo WAL y con control manual de transacciones."""
     target = Path(db_path or os.getenv("DATABASE_PATH", DEFAULT_DB_PATH)).resolve()
@@ -77,23 +69,6 @@ def _registrar_log(conn: sqlite3.Connection, id_cita: str, id_saga: str, rut: st
     )
 
 
-def _respuesta_cita(
-    cita_id: str, id_saga: str, rut: str, nombre: str, jornada: str, horario: str, elegibilidad: str, estado: str, idempotente: bool
-) -> Dict[str, Any]:
-    return {
-        "ok": True,
-        "cita_id": cita_id,
-        "id_saga": id_saga,
-        "rut_donante": rut,
-        "nombre_donante": nombre,
-        "id_jornada": jornada,
-        "horario": horario,
-        "estado_elegibilidad": elegibilidad,
-        "estado": estado,
-        "idempotente": idempotente,
-    }
-
-
 def registrar_donacion(
     id_saga: str,
     rut_donante: str,
@@ -104,10 +79,6 @@ def registrar_donacion(
     db_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Registra una cita médica de donación de forma atómica e idempotente."""
-    if estado_elegibilidad not in ("APTO", "PENDIENTE_VALIDACION"):
-        logger.warning("[REGISTRO] ELEGIBILIDAD INVALIDA (422) | estado=%s | saga=%s", estado_elegibilidad, id_saga)
-        raise ElegibilidadInvalidaError(f"Estado de elegibilidad inválido: '{estado_elegibilidad}'.")
-
     estado_cita = "PENDIENTE_VALIDACION" if estado_elegibilidad == "PENDIENTE_VALIDACION" else "CONFIRMADA"
 
     try:
@@ -131,11 +102,14 @@ def registrar_donacion(
                         "REGISTRAR_IDEMPOTENTE", "Reintento idempotente de registro",
                     )
                     logger.info("[REGISTRO] CITA IDEMPOTENTE (200) | cita_id=%s | saga=%s", existente["id_cita"], id_saga)
-                    return _respuesta_cita(
-                        existente["id_cita"], id_saga, existente["rut_donante"], existente["nombre_donante"],
-                        existente["id_jornada"], existente["horario"], existente["estado_elegibilidad"],
-                        existente["estado"], True,
-                    )
+                    return {
+                        "ok": True,
+                        "cita_id": existente["id_cita"],
+                        "id_saga": id_saga,
+                        "estado_elegibilidad": existente["estado_elegibilidad"],
+                        "estado": existente["estado"],
+                        "idempotente": True,
+                    }
 
                 cita_id = existente["id_cita"]
                 conn.execute(
@@ -153,12 +127,17 @@ def registrar_donacion(
 
             _registrar_log(conn, cita_id, id_saga, rut_donante, "REGISTRAR", f"Cita registrada ({estado_cita})")
             logger.info("[REGISTRO] CITA CREADA (201) | cita_id=%s | saga=%s | estado=%s", cita_id, id_saga, estado_cita)
-            return _respuesta_cita(
-                cita_id, id_saga, rut_donante, nombre_donante, id_jornada, horario, estado_elegibilidad, estado_cita, False
-            )
+            return {
+                "ok": True,
+                "cita_id": cita_id,
+                "id_saga": id_saga,
+                "estado_elegibilidad": estado_elegibilidad,
+                "estado": estado_cita,
+                "idempotente": False,
+            }
     except sqlite3.IntegrityError as exc:
         logger.warning("[REGISTRO] Violación de integridad SQLite (409): %s", exc)
-        raise ColisionIdempotenciaError("Conflicto de integridad en identificador de cita o SAGA.") from exc
+        raise ColisionIdempotenciaError("Conflicto de integridad en datos de la cita o SAGA.") from exc
 
 
 def anular_donacion(id_saga: str, db_path: Optional[str] = None) -> Dict[str, Any]:
@@ -208,9 +187,9 @@ def obtener_citas_donante(rut_donante: str, db_path: Optional[str] = None) -> Li
     conn = get_connection(db_path)
     try:
         rows = conn.execute(
-            "SELECT id_cita AS cita_id, id_saga, rut_donante, nombre_donante, "
-            "id_jornada, horario, estado_elegibilidad, estado, created_at "
-            "FROM citas_donacion WHERE rut_donante = ? AND estado != 'ANULADA' ORDER BY created_at DESC",
+            "SELECT id_cita AS cita_id, rut_donante, nombre_donante, id_jornada, "
+            "horario, estado_elegibilidad, estado FROM citas_donacion "
+            "WHERE rut_donante = ? AND estado != 'ANULADA' ORDER BY created_at DESC",
             (rut_donante,),
         ).fetchall()
         return [dict(row) for row in rows]

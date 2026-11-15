@@ -1,15 +1,12 @@
 from contextlib import asynccontextmanager
-import os
 import sqlite3
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import AsyncGenerator, Dict, List, Optional
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 
 from src.db import (
     CitaNoEncontradaError,
     ColisionIdempotenciaError,
-    ElegibilidadInvalidaError,
-    FallaSimuladaRegistroError,
     anular_donacion,
     init_db,
     logger,
@@ -19,14 +16,9 @@ from src.db import (
 from src.models import (
     AnularDonacionResponse,
     CitaDonanteItem,
-    ConfigFallaRequest,
     RegistrarDonacionRequest,
     RegistrarDonacionResponse,
 )
-
-ESTADO_CAOS: Dict[str, bool] = {
-    "simular_falla": os.getenv("SIMULAR_FALLA", "false").lower() in ("true", "1", "yes"),
-}
 
 
 @asynccontextmanager
@@ -53,17 +45,6 @@ async def no_encontrado_handler(_req: Request, exc: CitaNoEncontradaError) -> JS
     return JSONResponse(status_code=status.HTTP_404_NOT_FOUND, content={"detail": str(exc)})
 
 
-@app.exception_handler(ElegibilidadInvalidaError)
-async def elegibilidad_invalida_handler(_req: Request, exc: ElegibilidadInvalidaError) -> JSONResponse:
-    return JSONResponse(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content={"detail": str(exc)})
-
-
-@app.exception_handler(FallaSimuladaRegistroError)
-async def falla_simulada_handler(_req: Request, exc: FallaSimuladaRegistroError) -> JSONResponse:
-    logger.error("[REGISTRO] Fallo inducido en Paso 3 (500): %s", exc)
-    return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={"detail": str(exc)})
-
-
 @app.exception_handler(sqlite3.OperationalError)
 async def sqlite_ocupado_handler(_req: Request, exc: sqlite3.OperationalError) -> JSONResponse:
     logger.error("[REGISTRO] Bloqueo temporal de SQLite (503): %s", exc)
@@ -83,16 +64,8 @@ async def sqlite_error_handler(_req: Request, exc: sqlite3.Error) -> JSONRespons
 
 
 @app.get("/health", status_code=status.HTTP_200_OK)
-def healthcheck() -> Dict[str, Any]:
-    return {"status": "ok", "service": "registro-service", "simular_falla": ESTADO_CAOS["simular_falla"]}
-
-
-@app.post("/registro/config/falla", status_code=status.HTTP_200_OK)
-def configurar_falla(payload: ConfigFallaRequest) -> Dict[str, Any]:
-    """Activa o desactiva la simulación de fallo HTTP 500 para demostrar el Escenario 2."""
-    ESTADO_CAOS["simular_falla"] = payload.fallar
-    logger.warning("[REGISTRO] Simulación de falla configurada en: %s", payload.fallar)
-    return {"ok": True, "simular_falla": ESTADO_CAOS["simular_falla"]}
+def healthcheck() -> Dict[str, str]:
+    return {"status": "ok", "service": "registro-service"}
 
 
 @app.post("/registro/donaciones", response_model=RegistrarDonacionResponse, status_code=status.HTTP_201_CREATED)
@@ -108,12 +81,6 @@ def endpoint_registrar_donacion(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Debe enviar 'id_saga' en el body o en la cabecera 'X-Saga-ID'.",
         )
-
-    if ESTADO_CAOS["simular_falla"]:
-        raise FallaSimuladaRegistroError(
-            "Fallo simulado en el servicio de registro (Escenario 2: compensación inversa)."
-        )
-
     resultado = registrar_donacion(
         id_saga=saga_id,
         rut_donante=payload.rut_donante,

@@ -23,10 +23,6 @@ class RegistrarDonacionResponse(BaseModel):
     ok: bool = True
     cita_id: str
     id_saga: str
-    rut_donante: str
-    nombre_donante: str
-    id_jornada: str
-    horario: str
     estado_elegibilidad: str
     estado: str = "CONFIRMADA"
     idempotente: bool = False
@@ -47,17 +43,9 @@ class CitaDonanteItem(BaseModel):
     """Salida esperada al consultar el historial de citas médicas de un donante."""
 
     cita_id: str
-    id_saga: str
     rut_donante: str
     nombre_donante: str
     id_jornada: str
     horario: str
     estado_elegibilidad: str
-    estado: str
-    created_at: str
-
-
-class ConfigFallaRequest(BaseModel):
-    """Payload para activar o desactivar la simulación de falla en el Paso 3."""
-
-    fallar: bool = Field(..., description="True para forzar HTTP 500 en el registro de donaciones")
+    estado: str = "CONFIRMADA"

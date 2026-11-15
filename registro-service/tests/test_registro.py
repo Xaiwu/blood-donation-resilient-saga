@@ -12,7 +12,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.db import (
     CitaNoEncontradaError,
     ColisionIdempotenciaError,
-    ElegibilidadInvalidaError,
     anular_donacion,
     init_db,
     obtener_citas_donante,
@@ -52,15 +51,12 @@ class TestRegistroPersistence(unittest.TestCase):
         with self.assertRaises(ColisionIdempotenciaError):
             registrar_donacion("saga-col", "12.345.678-9", "Ana", "JORNADA-01", "09:00", "PENDIENTE_VALIDACION", self.db_path)
 
-    def test_degradacion_pendiente_validacion_y_rechazo_no_apto_422(self) -> None:
-        """Verifica el estado PENDIENTE_VALIDACION cuando Elegibilidad degrada y el rechazo 422 ante estado inválido."""
+    def test_degradacion_pendiente_validacion(self) -> None:
+        """Verifica el estado PENDIENTE_VALIDACION cuando Elegibilidad degrada."""
         r_deg = registrar_donacion(
             "saga-deg", "12.345.678-9", "Ana", "JORNADA-01", "10:30", "PENDIENTE_VALIDACION", self.db_path
         )
         self.assertEqual(r_deg["estado"], "PENDIENTE_VALIDACION")
-
-        with self.assertRaises(ElegibilidadInvalidaError):
-            registrar_donacion("saga-inv", "12.345.678-9", "Ana", "JORNADA-01", "11:00", "NO_APTO", self.db_path)
 
     def test_anulacion_idempotente_y_no_encontrada_404(self) -> None:
         """Verifica que anular cambia el estado una única vez y lanza 404 si la SAGA no existe."""
