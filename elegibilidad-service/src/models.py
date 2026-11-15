@@ -33,9 +33,15 @@ class ConfigurarLatenciaRequest(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    latencia_segundos: Optional[float] = Field(default=None, description="Segundos de demora por petición")
-    segundos: Optional[float] = Field(default=None, description="Alias de latencia_segundos")
-    latencia: Optional[float] = Field(default=None, description="Alias corto de latencia_segundos")
+    latencia_segundos: Optional[float] = Field(
+        default=None, ge=0.0, le=60.0, description="Segundos de demora por petición (0.0 a 60.0)"
+    )
+    segundos: Optional[float] = Field(
+        default=None, ge=0.0, le=60.0, description="Alias de latencia_segundos (0.0 a 60.0)"
+    )
+    latencia: Optional[float] = Field(
+        default=None, ge=0.0, le=60.0, description="Alias corto de latencia_segundos (0.0 a 60.0)"
+    )
 
     def obtener_segundos(self) -> float:
         """Retorna el valor de latencia configurado desde cualquiera de los campos admitidos."""

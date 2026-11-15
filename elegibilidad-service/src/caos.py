@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 import threading
 import time
@@ -6,6 +7,8 @@ from typing import Any, Dict, Optional
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 logger = logging.getLogger("elegibilidad-service")
+
+LATENCIA_MAXIMA_SEGUNDOS = 60.0
 
 
 class FallaSimuladaError(Exception):
@@ -26,7 +29,20 @@ def _parse_float(valor: Optional[str], defecto: float = 0.0) -> float:
     if valor is None:
         return defecto
     try:
-        return max(0.0, float(valor.strip()))
+        numero = float(valor.strip())
+        if not math.isfinite(numero):
+            return defecto
+        return min(LATENCIA_MAXIMA_SEGUNDOS, max(0.0, numero))
+    except ValueError:
+        return defecto
+
+
+def _parse_codigo_falla(valor: Optional[str], defecto: int = 500) -> int:
+    if valor is None:
+        return defecto
+    try:
+        codigo = int(valor.strip())
+        return codigo if 500 <= codigo <= 599 else defecto
     except ValueError:
         return defecto
 
@@ -38,7 +54,7 @@ class _ControladorCaos:
         self._lock = threading.Lock()
         self._simular_falla: bool = _parse_bool(os.getenv("SIMULAR_FALLA"), False)
         self._latencia_segundos: float = _parse_float(os.getenv("LATENCIA_SEGUNDOS"), 0.0)
-        self._codigo_falla: int = int(os.getenv("CODIGO_FALLA_HTTP", "500"))
+        self._codigo_falla: int = _parse_codigo_falla(os.getenv("CODIGO_FALLA_HTTP"), 500)
 
     def estado(self, mensaje: str = "Estado actual del simulador de caos.") -> Dict[str, Any]:
         with self._lock:
@@ -51,8 +67,8 @@ class _ControladorCaos:
             }
 
     def configurar_latencia(self, segundos: float) -> Dict[str, Any]:
-        if segundos < 0:
-            raise ValueError("La latencia en segundos no puede ser negativa.")
+        if not math.isfinite(segundos) or segundos < 0.0 or segundos > LATENCIA_MAXIMA_SEGUNDOS:
+            raise ValueError(f"La latencia en segundos debe estar entre 0.0 y {LATENCIA_MAXIMA_SEGUNDOS}.")
         with self._lock:
             self._latencia_segundos = round(float(segundos), 3)
             actual = self._latencia_segundos
@@ -145,8 +161,8 @@ if FASTAPI_INSTALADO:
     @router.post("/config/latencia", response_model=EstadoCaosResponse, status_code=status.HTTP_200_OK)
     def endpoint_configurar_latencia(
         payload: Optional[ConfigurarLatenciaRequest] = None,
-        latencia_segundos: Optional[float] = Query(default=None),
-        segundos: Optional[float] = Query(default=None),
+        latencia_segundos: Optional[float] = Query(default=None, ge=0.0, le=LATENCIA_MAXIMA_SEGUNDOS),
+        segundos: Optional[float] = Query(default=None, ge=0.0, le=LATENCIA_MAXIMA_SEGUNDOS),
     ) -> EstadoCaosResponse:
         """Configura la demora artificial (en segundos) para probar Timeouts y Bulkhead."""
         valor = (
@@ -154,12 +170,13 @@ if FASTAPI_INSTALADO:
             if latencia_segundos is not None
             else (segundos if segundos is not None else (payload.obtener_segundos() if payload else 0.0))
         )
-        if valor < 0:
+        try:
+            return EstadoCaosResponse(**configurar_latencia(valor))
+        except ValueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="La latencia en segundos debe ser mayor o igual a 0.",
-            )
-        return EstadoCaosResponse(**configurar_latencia(valor))
+                detail=str(exc),
+            ) from exc
 
     @router.post("/elegibilidad/config/falla", response_model=EstadoCaosResponse, status_code=status.HTTP_200_OK)
     @router.post("/config/falla", response_model=EstadoCaosResponse, status_code=status.HTTP_200_OK)
@@ -175,7 +192,13 @@ if FASTAPI_INSTALADO:
             else (falla if falla is not None else (payload.obtener_activa() if payload else True))
         )
         codigo = payload.codigo_falla if payload else 500
-        return EstadoCaosResponse(**configurar_falla(activa=activa, codigo_falla=codigo))
+        try:
+            return EstadoCaosResponse(**configurar_falla(activa=activa, codigo_falla=codigo))
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
 
     @router.post("/elegibilidad/config/reset", response_model=EstadoCaosResponse, status_code=status.HTTP_200_OK)
     @router.post("/config/reset", response_model=EstadoCaosResponse, status_code=status.HTTP_200_OK)
