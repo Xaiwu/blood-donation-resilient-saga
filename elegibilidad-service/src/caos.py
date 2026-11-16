@@ -140,7 +140,7 @@ def aplicar_caos(id_saga: Optional[str] = None) -> None:
 
 
 try:
-    from fastapi import APIRouter, HTTPException, Query, status
+    from fastapi import APIRouter, Body, HTTPException, Query, status
     FASTAPI_INSTALADO = True
 except ImportError:
     FASTAPI_INSTALADO = False
@@ -160,15 +160,15 @@ if FASTAPI_INSTALADO:
     @router.post("/elegibilidad/config/latencia", response_model=EstadoCaosResponse, status_code=status.HTTP_200_OK)
     @router.post("/config/latencia", response_model=EstadoCaosResponse, status_code=status.HTTP_200_OK)
     def endpoint_configurar_latencia(
-        payload: Optional[ConfigurarLatenciaRequest] = None,
+        payload: Optional[ConfigurarLatenciaRequest] = Body(default=None),
         latencia_segundos: Optional[float] = Query(default=None, ge=0.0, le=LATENCIA_MAXIMA_SEGUNDOS),
         segundos: Optional[float] = Query(default=None, ge=0.0, le=LATENCIA_MAXIMA_SEGUNDOS),
+        latencia: Optional[float] = Query(default=None, ge=0.0, le=LATENCIA_MAXIMA_SEGUNDOS),
     ) -> EstadoCaosResponse:
         """Configura la demora artificial (en segundos) para probar Timeouts y Bulkhead."""
-        valor = (
-            latencia_segundos
-            if latencia_segundos is not None
-            else (segundos if segundos is not None else (payload.obtener_segundos() if payload else 0.0))
+        valor = next(
+            (v for v in (latencia_segundos, segundos, latencia) if v is not None),
+            payload.obtener_segundos() if payload else 0.0,
         )
         try:
             return EstadoCaosResponse(**configurar_latencia(valor))
@@ -181,19 +181,21 @@ if FASTAPI_INSTALADO:
     @router.post("/elegibilidad/config/falla", response_model=EstadoCaosResponse, status_code=status.HTTP_200_OK)
     @router.post("/config/falla", response_model=EstadoCaosResponse, status_code=status.HTTP_200_OK)
     def endpoint_configurar_falla(
-        payload: Optional[ConfigurarFallaRequest] = None,
+        payload: Optional[ConfigurarFallaRequest] = Body(default=None),
         simular_falla: Optional[bool] = Query(default=None),
         falla: Optional[bool] = Query(default=None),
+        activa: Optional[bool] = Query(default=None),
+        activo: Optional[bool] = Query(default=None),
+        codigo_falla: Optional[int] = Query(default=None, ge=500, le=599),
     ) -> EstadoCaosResponse:
         """Activa o desactiva la simulación de caída (HTTP 500/503) para probar Circuit Breaker y Fallback."""
-        activa = (
-            simular_falla
-            if simular_falla is not None
-            else (falla if falla is not None else (payload.obtener_activa() if payload else True))
+        estado_activa = next(
+            (v for v in (simular_falla, falla, activa, activo) if v is not None),
+            payload.obtener_activa() if payload else True,
         )
-        codigo = payload.codigo_falla if payload else 500
+        codigo = codigo_falla if codigo_falla is not None else (payload.codigo_falla if payload else 500)
         try:
-            return EstadoCaosResponse(**configurar_falla(activa=activa, codigo_falla=codigo))
+            return EstadoCaosResponse(**configurar_falla(activa=estado_activa, codigo_falla=codigo))
         except ValueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

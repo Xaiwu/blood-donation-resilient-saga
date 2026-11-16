@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class ValidarElegibilidadRequest(BaseModel):
     """Payload de entrada para validar la aptitud médica de un donante."""
 
-    model_config = ConfigDict(extra="allow", str_strip_whitespace=True)
+    model_config = ConfigDict(extra="allow", str_strip_whitespace=True, allow_inf_nan=False)
 
     id_saga: Optional[str] = Field(default=None, min_length=1, description="Identificador único de la transacción SAGA")
     rut_donante: str = Field(..., min_length=1, description="RUT del donante a validar")
@@ -31,7 +31,7 @@ class ValidarElegibilidadResponse(BaseModel):
 class ConfigurarLatenciaRequest(BaseModel):
     """Payload para inyectar latencia artificial en el servicio de elegibilidad."""
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", allow_inf_nan=False)
 
     latencia_segundos: Optional[float] = Field(
         default=None, ge=0.0, le=60.0, description="Segundos de demora por petición (0.0 a 60.0)"

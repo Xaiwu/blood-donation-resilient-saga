@@ -1,3 +1,4 @@
+import math
 from typing import Any, Dict, Optional
 
 from src.caos import (
@@ -60,6 +61,10 @@ def evaluar_elegibilidad(
     aplicar_caos(id_saga=id_saga)
 
     rut_limpio = rut_donante.strip()
+    if not rut_limpio or not normalizar_rut(rut_limpio):
+        motivo = "El identificador 'rut_donante' no contiene caracteres alfanuméricos válidos."
+        logger.info("[ELEGIBILIDAD] NO APTO (422) | rut=%s | saga=%s | motivo=%s", rut_limpio, id_saga, motivo)
+        raise DonanteNoAptoError(rut_donante=rut_limpio, motivo=motivo, id_saga=id_saga)
 
     if apto is False or elegible is False:
         motivo = "Donante marcado explícitamente como no apto en la evaluación clínica."
@@ -71,12 +76,12 @@ def evaluar_elegibilidad(
         logger.info("[ELEGIBILIDAD] NO APTO (422) | rut=%s | saga=%s | motivo=%s", rut_limpio, id_saga, motivo_historial)
         raise DonanteNoAptoError(rut_donante=rut_limpio, motivo=motivo_historial, id_saga=id_saga)
 
-    if edad is not None and (edad < EDAD_MINIMA or edad > EDAD_MAXIMA):
+    if edad is not None and (isinstance(edad, bool) or edad < EDAD_MINIMA or edad > EDAD_MAXIMA):
         motivo = f"Edad ({edad} años) fuera del rango clínico permitido ({EDAD_MINIMA} a {EDAD_MAXIMA} años)."
         logger.info("[ELEGIBILIDAD] NO APTO (422) | rut=%s | saga=%s | motivo=%s", rut_limpio, id_saga, motivo)
         raise DonanteNoAptoError(rut_donante=rut_limpio, motivo=motivo, id_saga=id_saga)
 
-    if peso_kg is not None and peso_kg < PESO_MINIMO_KG:
+    if peso_kg is not None and (isinstance(peso_kg, bool) or not math.isfinite(peso_kg) or peso_kg < PESO_MINIMO_KG):
         motivo = f"Peso corporal ({peso_kg} kg) inferior al mínimo clínico requerido ({PESO_MINIMO_KG} kg)."
         logger.info("[ELEGIBILIDAD] NO APTO (422) | rut=%s | saga=%s | motivo=%s", rut_limpio, id_saga, motivo)
         raise DonanteNoAptoError(rut_donante=rut_limpio, motivo=motivo, id_saga=id_saga)
@@ -94,7 +99,7 @@ def evaluar_elegibilidad(
 
 
 if FASTAPI_INSTALADO:
-    from fastapi import FastAPI, Header, HTTPException, Request, status
+    from fastapi import FastAPI, Header, Request, status
     from fastapi.responses import JSONResponse
     from src.models import ValidarElegibilidadRequest, ValidarElegibilidadResponse
 
@@ -148,11 +153,6 @@ if FASTAPI_INSTALADO:
         x_saga_id: Optional[str] = Header(default=None, alias="X-Saga-ID"),
     ) -> ValidarElegibilidadResponse:
         """Valida si el donante es apto para donar sangre (200 si es apto, 422 si no es apto, 500 si hay falla simulada)."""
-        if not payload.rut_donante.strip():
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="El campo 'rut_donante' no puede estar vacío.",
-            )
         saga_id = (payload.id_saga or x_saga_id or "").strip() or None
         resultado = evaluar_elegibilidad(
             rut_donante=payload.rut_donante,

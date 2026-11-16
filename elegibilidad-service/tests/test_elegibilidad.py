@@ -50,8 +50,8 @@ class TestElegibilidadLogicaYCaos(unittest.TestCase):
         self.assertTrue(r2["apto"])
         self.assertEqual(r2["estado"], "APTO")
 
-    def test_rechazo_por_edad_y_peso_fuera_de_rango(self) -> None:
-        """Verifica que menores de 18, mayores de 65 o con peso < 50 kg lancen DonanteNoAptoError."""
+    def test_rechazo_por_edad_y_peso_fuera_de_rango_o_nan_inf(self) -> None:
+        """Verifica que menores de 18, mayores de 65, peso < 50 kg o NaN/inf lancen DonanteNoAptoError."""
         with self.assertRaises(DonanteNoAptoError):
             evaluar_elegibilidad("12.345.678-9", edad=17, peso_kg=65.0)
 
@@ -61,9 +61,17 @@ class TestElegibilidadLogicaYCaos(unittest.TestCase):
         with self.assertRaises(DonanteNoAptoError):
             evaluar_elegibilidad("12.345.678-9", edad=30, peso_kg=49.5)
 
-    def test_rechazo_por_historial_medico_rut_normalizado_y_flags(self) -> None:
-        """Verifica normalización de RUTs en el almacén médico y flags explícitos apto/elegible=False."""
+        for peso_invalido in (float("nan"), float("inf"), float("-inf")):
+            with self.assertRaises(DonanteNoAptoError):
+                evaluar_elegibilidad("12.345.678-9", edad=30, peso_kg=peso_invalido)
+
+    def test_rechazo_por_historial_medico_rut_normalizado_vacio_y_flags(self) -> None:
+        """Verifica normalización de RUTs en el almacén médico, RUT vacío/inválido y flags apto/elegible=False."""
         self.assertEqual(normalizar_rut(" 11.111.111-k "), "11111111K")
+
+        for rut_vacio in ("", "   ", "---", "..."):
+            with self.assertRaises(DonanteNoAptoError):
+                evaluar_elegibilidad(rut_vacio, edad=30, peso_kg=70.0)
 
         with self.assertRaises(DonanteNoAptoError) as ctx_hemo:
             evaluar_elegibilidad("00.000.000-0", edad=30, peso_kg=70.0)
@@ -176,10 +184,14 @@ class TestElegibilidadEndpoints(unittest.TestCase):
     @patch("src.caos.time.sleep")
     def test_endpoints_caos_latencia_falla_query_params_y_rechazos_422(self, mock_sleep) -> None:
         """Verifica los endpoints /elegibilidad/config/* y /config/*, query params y rechazos 422."""
-        # 1. Configurar latencia en /elegibilidad/config/latencia
+        # 1. Configurar latencia por body y por query param (?latencia=2.5)
         r_lat = self.client.post("/elegibilidad/config/latencia", json={"latencia_segundos": 5.0})
         self.assertEqual(r_lat.status_code, 200)
         self.assertEqual(r_lat.json()["latencia_segundos"], 5.0)
+
+        r_lat_qp = self.client.post("/config/latencia?latencia=2.5")
+        self.assertEqual(r_lat_qp.status_code, 200)
+        self.assertEqual(r_lat_qp.json()["latencia_segundos"], 2.5)
 
         # Rechazo 422 si latencia es negativa o > 60s
         r_lat_inv = self.client.post("/config/latencia", json={"latencia_segundos": -2.0})
@@ -187,19 +199,24 @@ class TestElegibilidadEndpoints(unittest.TestCase):
 
         r_val = self.client.post("/elegibilidad/validar", json={"rut_donante": "12.345.678-9"})
         self.assertEqual(r_val.status_code, 200)
-        mock_sleep.assert_called_once_with(5.0)
+        mock_sleep.assert_called_once_with(2.5)
 
-        # 2. Activar falla HTTP 500 en /config/falla
-        r_falla = self.client.post("/config/falla", json={"simular_falla": True})
+        # 2. Activar falla HTTP 503 por query params (?simular_falla=true&codigo_falla=503) y consultar GET /config
+        r_falla = self.client.post("/config/falla?simular_falla=true&codigo_falla=503")
         self.assertEqual(r_falla.status_code, 200)
         self.assertTrue(r_falla.json()["simular_falla"])
+        self.assertEqual(r_falla.json()["codigo_falla"], 503)
+
+        r_cfg = self.client.get("/elegibilidad/config")
+        self.assertEqual(r_cfg.status_code, 200)
+        self.assertEqual(r_cfg.json()["codigo_falla"], 503)
 
         # Rechazo 422 si el código de falla no es 5xx
         r_falla_inv = self.client.post("/config/falla", json={"simular_falla": True, "codigo_falla": 400})
         self.assertEqual(r_falla_inv.status_code, 422)
 
         r_caido = self.client.post("/elegibilidad/validar", json={"rut_donante": "12.345.678-9"})
-        self.assertEqual(r_caido.status_code, 500)
+        self.assertEqual(r_caido.status_code, 503)
 
         # El healthcheck sigue respondiendo 200 aunque el caos esté activo
         r_health = self.client.get("/health")
