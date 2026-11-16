@@ -83,6 +83,7 @@ services:
     environment:
       SIMULAR_FALLA: "${SIMULAR_FALLA:-false}"
       LATENCIA_SEGUNDOS: "${LATENCIA_SEGUNDOS:-0}"
+      CODIGO_FALLA_HTTP: "${CODIGO_FALLA_HTTP:-500}"
     networks:
       - interna
     healthcheck:

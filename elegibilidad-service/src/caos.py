@@ -4,6 +4,9 @@ import os
 import threading
 import time
 from typing import Any, Dict, Optional
+from fastapi import APIRouter, HTTPException, status
+
+from src.models import ConfigurarFallaRequest, ConfigurarLatenciaRequest, EstadoCaosResponse
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 logger = logging.getLogger("elegibilidad-service")
@@ -139,71 +142,44 @@ def aplicar_caos(id_saga: Optional[str] = None) -> None:
     _caos.aplicar(id_saga=id_saga)
 
 
-try:
-    from fastapi import APIRouter, Body, HTTPException, Query, status
-    FASTAPI_INSTALADO = True
-except ImportError:
-    FASTAPI_INSTALADO = False
-    router = None  # type: ignore
+router = APIRouter(tags=["Inyección de Caos"])
 
-if FASTAPI_INSTALADO:
-    from src.models import ConfigurarFallaRequest, ConfigurarLatenciaRequest, EstadoCaosResponse
 
-    router = APIRouter(tags=["Inyección de Caos"])
+@router.get("/config", response_model=EstadoCaosResponse, status_code=status.HTTP_200_OK)
+def endpoint_obtener_config() -> EstadoCaosResponse:
+    """Consulta el estado actual de latencia e inyección de fallas."""
+    return EstadoCaosResponse(**obtener_estado_caos())
 
-    @router.get("/elegibilidad/config", response_model=EstadoCaosResponse, status_code=status.HTTP_200_OK)
-    @router.get("/config", response_model=EstadoCaosResponse, status_code=status.HTTP_200_OK)
-    def endpoint_obtener_config() -> EstadoCaosResponse:
-        """Consulta el estado actual de latencia e inyección de fallas."""
-        return EstadoCaosResponse(**obtener_estado_caos())
 
-    @router.post("/elegibilidad/config/latencia", response_model=EstadoCaosResponse, status_code=status.HTTP_200_OK)
-    @router.post("/config/latencia", response_model=EstadoCaosResponse, status_code=status.HTTP_200_OK)
-    def endpoint_configurar_latencia(
-        payload: Optional[ConfigurarLatenciaRequest] = Body(default=None),
-        latencia_segundos: Optional[float] = Query(default=None, ge=0.0, le=LATENCIA_MAXIMA_SEGUNDOS),
-        segundos: Optional[float] = Query(default=None, ge=0.0, le=LATENCIA_MAXIMA_SEGUNDOS),
-        latencia: Optional[float] = Query(default=None, ge=0.0, le=LATENCIA_MAXIMA_SEGUNDOS),
-    ) -> EstadoCaosResponse:
-        """Configura la demora artificial (en segundos) para probar Timeouts y Bulkhead."""
-        valor = next(
-            (v for v in (latencia_segundos, segundos, latencia) if v is not None),
-            payload.obtener_segundos() if payload else 0.0,
-        )
-        try:
-            return EstadoCaosResponse(**configurar_latencia(valor))
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=str(exc),
-            ) from exc
+@router.post("/config/latencia", response_model=EstadoCaosResponse, status_code=status.HTTP_200_OK)
+def endpoint_configurar_latencia(payload: ConfigurarLatenciaRequest) -> EstadoCaosResponse:
+    """Configura la demora artificial (en segundos) para probar Timeouts y Bulkhead."""
+    try:
+        return EstadoCaosResponse(**configurar_latencia(payload.latencia_segundos))
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
 
-    @router.post("/elegibilidad/config/falla", response_model=EstadoCaosResponse, status_code=status.HTTP_200_OK)
-    @router.post("/config/falla", response_model=EstadoCaosResponse, status_code=status.HTTP_200_OK)
-    def endpoint_configurar_falla(
-        payload: Optional[ConfigurarFallaRequest] = Body(default=None),
-        simular_falla: Optional[bool] = Query(default=None),
-        falla: Optional[bool] = Query(default=None),
-        activa: Optional[bool] = Query(default=None),
-        activo: Optional[bool] = Query(default=None),
-        codigo_falla: Optional[int] = Query(default=None, ge=500, le=599),
-    ) -> EstadoCaosResponse:
-        """Activa o desactiva la simulación de caída (HTTP 500/503) para probar Circuit Breaker y Fallback."""
-        estado_activa = next(
-            (v for v in (simular_falla, falla, activa, activo) if v is not None),
-            payload.obtener_activa() if payload else True,
-        )
-        codigo = codigo_falla if codigo_falla is not None else (payload.codigo_falla if payload else 500)
-        try:
-            return EstadoCaosResponse(**configurar_falla(activa=estado_activa, codigo_falla=codigo))
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=str(exc),
-            ) from exc
 
-    @router.post("/elegibilidad/config/reset", response_model=EstadoCaosResponse, status_code=status.HTTP_200_OK)
-    @router.post("/config/reset", response_model=EstadoCaosResponse, status_code=status.HTTP_200_OK)
-    def endpoint_resetear_caos() -> EstadoCaosResponse:
-        """Restablece el servicio a su operación normal sin latencia ni fallas."""
-        return EstadoCaosResponse(**resetear_caos())
+@router.post("/config/falla", response_model=EstadoCaosResponse, status_code=status.HTTP_200_OK)
+def endpoint_configurar_falla(
+    payload: Optional[ConfigurarFallaRequest] = None,
+) -> EstadoCaosResponse:
+    """Activa o desactiva la simulación de caída (HTTP 500/503) para probar Circuit Breaker y Fallback."""
+    activa = payload.simular_falla if payload else True
+    codigo = payload.codigo_falla if payload else 500
+    try:
+        return EstadoCaosResponse(**configurar_falla(activa=activa, codigo_falla=codigo))
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post("/config/reset", response_model=EstadoCaosResponse, status_code=status.HTTP_200_OK)
+def endpoint_resetear_caos() -> EstadoCaosResponse:
+    """Restablece el servicio a su operación normal sin latencia ni fallas."""
+    return EstadoCaosResponse(**resetear_caos())

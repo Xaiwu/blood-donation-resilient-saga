@@ -7,6 +7,8 @@ import threading
 import unittest
 from unittest.mock import patch
 
+from fastapi.testclient import TestClient
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.caos import (
@@ -18,15 +20,7 @@ from src.caos import (
     obtener_estado_caos,
     resetear_caos,
 )
-from src.main import DonanteNoAptoError, evaluar_elegibilidad, normalizar_rut
-
-try:
-    from fastapi.testclient import TestClient
-    from src.main import app
-
-    FASTAPI_DISPONIBLE = True
-except ImportError:
-    FASTAPI_DISPONIBLE = False
+from src.main import DonanteNoAptoError, app, evaluar_elegibilidad, normalizar_rut
 
 
 class TestElegibilidadLogicaYCaos(unittest.TestCase):
@@ -150,7 +144,6 @@ class TestElegibilidadLogicaYCaos(unittest.TestCase):
         self.assertEqual(resultados.count("NO_APTO"), 4)
 
 
-@unittest.skipUnless(FASTAPI_DISPONIBLE, "FastAPI/TestClient no instalado en el entorno local")
 class TestElegibilidadEndpoints(unittest.TestCase):
     """Pruebas de contrato HTTP con TestClient para validación y endpoints de caos."""
 
@@ -182,32 +175,29 @@ class TestElegibilidadEndpoints(unittest.TestCase):
         self.assertEqual(resp_no_apto.json()["estado"], "NO_APTO")
 
     @patch("src.caos.time.sleep")
-    def test_endpoints_caos_latencia_falla_query_params_y_rechazos_422(self, mock_sleep) -> None:
-        """Verifica los endpoints /elegibilidad/config/* y /config/*, query params y rechazos 422."""
-        # 1. Configurar latencia por body y por query param (?latencia=2.5)
-        r_lat = self.client.post("/elegibilidad/config/latencia", json={"latencia_segundos": 5.0})
+    def test_endpoints_caos_latencia_falla_y_rechazos_422(self, mock_sleep) -> None:
+        """Verifica los endpoints /config/* y el rechazo 422 ante parámetros faltantes o inválidos."""
+        # 1. Configurar latencia en /config/latencia
+        r_lat = self.client.post("/config/latencia", json={"latencia_segundos": 5.0})
         self.assertEqual(r_lat.status_code, 200)
         self.assertEqual(r_lat.json()["latencia_segundos"], 5.0)
 
-        r_lat_qp = self.client.post("/config/latencia?latencia=2.5")
-        self.assertEqual(r_lat_qp.status_code, 200)
-        self.assertEqual(r_lat_qp.json()["latencia_segundos"], 2.5)
-
-        # Rechazo 422 si latencia es negativa o > 60s
-        r_lat_inv = self.client.post("/config/latencia", json={"latencia_segundos": -2.0})
-        self.assertEqual(r_lat_inv.status_code, 422)
+        # Rechazo 422 si no se envía valor o si la latencia es negativa
+        self.assertEqual(self.client.post("/config/latencia").status_code, 422)
+        self.assertEqual(self.client.post("/config/latencia", json={}).status_code, 422)
+        self.assertEqual(self.client.post("/config/latencia", json={"latencia_segundos": -2.0}).status_code, 422)
 
         r_val = self.client.post("/elegibilidad/validar", json={"rut_donante": "12.345.678-9"})
         self.assertEqual(r_val.status_code, 200)
-        mock_sleep.assert_called_once_with(2.5)
+        mock_sleep.assert_called_once_with(5.0)
 
-        # 2. Activar falla HTTP 503 por query params (?simular_falla=true&codigo_falla=503) y consultar GET /config
-        r_falla = self.client.post("/config/falla?simular_falla=true&codigo_falla=503")
+        # 2. Activar falla HTTP 503 en /config/falla y consultar GET /config
+        r_falla = self.client.post("/config/falla", json={"simular_falla": True, "codigo_falla": 503})
         self.assertEqual(r_falla.status_code, 200)
         self.assertTrue(r_falla.json()["simular_falla"])
         self.assertEqual(r_falla.json()["codigo_falla"], 503)
 
-        r_cfg = self.client.get("/elegibilidad/config")
+        r_cfg = self.client.get("/config")
         self.assertEqual(r_cfg.status_code, 200)
         self.assertEqual(r_cfg.json()["codigo_falla"], 503)
 
@@ -223,7 +213,7 @@ class TestElegibilidadEndpoints(unittest.TestCase):
         self.assertEqual(r_health.status_code, 200)
 
         # 3. Resetear caos y volver a validar con éxito
-        r_reset = self.client.post("/elegibilidad/config/reset")
+        r_reset = self.client.post("/config/reset")
         self.assertEqual(r_reset.status_code, 200)
         self.assertFalse(r_reset.json()["simular_falla"])
 
