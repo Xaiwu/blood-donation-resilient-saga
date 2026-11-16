@@ -32,7 +32,7 @@ def get_connection(db_path: Optional[str] = None) -> sqlite3.Connection:
 
     conn = sqlite3.connect(str(target), timeout=10.0, isolation_level=None)
     conn.row_factory = sqlite3.Row
-    for pragma in ("journal_mode = WAL", "synchronous = NORMAL", "foreign_keys = ON", "busy_timeout = 5000"):
+    for pragma in ("synchronous = NORMAL", "foreign_keys = ON", "busy_timeout = 5000"):
         conn.execute(f"PRAGMA {pragma};")
     return conn
 
@@ -73,7 +73,11 @@ def _registrar_log(conn: sqlite3.Connection, id_cupo: str, id_saga: str,
 
 def reservar_cupo(rut_donante: str, id_jornada: str, horario: str, id_saga: str,
     db_path: Optional[str] = None,) -> Dict[str, Any]:
-    """Reserva un cupo de forma atómica e idempotente usando BEGIN IMMEDIATE."""
+    """
+    Reserva un cupo de forma atómica e idempotente usando BEGIN IMMEDIATE.
+    Contrato de re-reserva: si el id_saga existe en estado LIBERADO (tras una compensación)
+    y se vuelve a solicitar con los mismos datos, se reactiva a RESERVADO descontando stock nuevamente.
+    """
     try:
         with immediate_transaction(db_path) as conn:
             existente = conn.execute("SELECT * FROM cupos WHERE id_saga = ?", (id_saga,)).fetchone()
@@ -119,6 +123,7 @@ def reservar_cupo(rut_donante: str, id_jornada: str, horario: str, id_saga: str,
                 (id_jornada,),
             )
 
+            # Si estaba en LIBERADO (compensación previa), una nueva solicitud con los mismos datos la vuelve a activar
             if existente is not None and existente["estado"] == "LIBERADO":
                 nuevo_id = existente["id_cupo"]
                 conn.execute(
