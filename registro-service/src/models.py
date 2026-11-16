@@ -9,9 +9,9 @@ class RegistrarDonacionRequest(BaseModel):
 
     id_saga: Optional[str] = Field(default=None, min_length=1, description="Identificador único de la transacción SAGA")
     rut_donante: str = Field(..., min_length=1, description="RUT del donante")
-    nombre_donante: str = Field(default="Donante", min_length=1, description="Nombre completo del donante")
-    id_jornada: str = Field(default="JORNADA-GENERAL", min_length=1, description="Identificador de la jornada")
-    horario: str = Field(default="09:00", min_length=1, description="Bloque horario agendado")
+    nombre_donante: str = Field(..., min_length=1, description="Nombre completo del donante")
+    id_jornada: str = Field(..., min_length=1, description="Identificador de la jornada")
+    horario: str = Field(..., min_length=1, description="Bloque horario agendado")
     estado_elegibilidad: Literal["APTO", "PENDIENTE_VALIDACION"] = Field(
         default="APTO", description="Resultado de elegibilidad médica ('APTO' o 'PENDIENTE_VALIDACION')"
     )
@@ -40,7 +40,7 @@ class AnularDonacionResponse(BaseModel):
 
 
 class CitaDonanteItem(BaseModel):
-    """Salida esperada al consultar el historial de citas médicas de un donante."""
+    """Salida esperada al consultar las citas médicas activas de un donante."""
 
     cita_id: str
     rut_donante: str

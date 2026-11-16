@@ -106,7 +106,7 @@ def endpoint_anular_donacion(id_saga: str) -> AnularDonacionResponse:
 
 @app.get("/registro/donantes/{rut}", response_model=List[CitaDonanteItem], status_code=status.HTTP_200_OK)
 def endpoint_citas_por_donante(rut: str) -> List[CitaDonanteItem]:
-    """Obtiene el historial de citas médicas activas de un donante por su RUT."""
+    """Obtiene las citas médicas activas (no anuladas) de un donante por su RUT."""
     if not rut.strip():
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
