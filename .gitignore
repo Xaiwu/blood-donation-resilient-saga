@@ -8,3 +8,6 @@ __pycache__/
 *.log
 .env
 .idea/
+
+# Resultados generados por experimentos/demo.py
+experimentos/resultados/
