@@ -196,6 +196,46 @@ def orden_compensaciones(id_saga: str) -> List[str]:
     return [linea.split(marca, 1)[1].strip() for linea in lineas if marca in linea]
 
 
+def marca_tiempo_docker() -> str:
+    """Instante actual en UTC, para pedir a docker compose logs solo lo ocurrido desde ahí."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 1))
+
+
+def eventos_bff(desde: str) -> List[Dict[str, Any]]:
+    """Eventos JSON del BFF (transiciones del circuito y rechazos del bulkhead) desde un instante."""
+    # Con muchas solicitudes simultáneas, dos líneas de log pueden quedar pegadas en una:
+    # se buscan todos los objetos JSON de cada línea, no solo el primero.
+    decodificador = json.JSONDecoder()
+    eventos = []
+    for linea in compose("logs", "--no-log-prefix", "--since", desde, "bff").splitlines():
+        inicio = linea.find('{"evento"')
+        while inicio >= 0:
+            try:
+                evento, fin = decodificador.raw_decode(linea, inicio)
+                eventos.append(evento)
+            except ValueError:
+                fin = inicio + 1
+            inicio = linea.find('{"evento"', fin)
+    return eventos
+
+
+def guardar_evidencia_resiliencia(nombre: str, antes: Dict[str, Any], desde: str) -> List[Dict[str, Any]]:
+    """Guarda el estado de /resiliencia/estado antes y después, y los eventos del BFF del escenario."""
+    despues = estado_resiliencia()
+    eventos = eventos_bff(desde)
+    RESULTADOS.mkdir(parents=True, exist_ok=True)
+    (RESULTADOS / f"{nombre}_estado.json").write_text(
+        json.dumps({"antes": antes, "despues": despues}, ensure_ascii=False, indent=2), encoding="utf-8")
+    (RESULTADOS / f"{nombre}_eventos.jsonl").write_text(
+        "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in eventos), encoding="utf-8")
+    transiciones = [f"{e['desde']}->{e['hacia']}" for e in eventos if e["evento"] == "circuito_transicion"]
+    rechazos = sum(e["evento"] == "bulkhead_rechazo" for e in eventos)
+    print(f"  Eventos del BFF: transiciones del circuito: {', '.join(transiciones) or 'ninguna'} | "
+          f"rechazos del bulkhead: {rechazos}")
+    print(f"  Evidencia guardada en {nombre}_estado.json y {nombre}_eventos.jsonl")
+    return eventos
+
+
 def id_saga_de(clave: str) -> str:
     """Misma derivación que el BFF (UUIDv5 de la Idempotency-Key)."""
     return str(uuid.uuid5(uuid.NAMESPACE_URL, clave))
@@ -286,7 +326,7 @@ def guardar_csv(nombre: str, filas: List[Dict[str, Any]]) -> Path:
         escritor = csv.DictWriter(f, fieldnames=campos)
         escritor.writeheader()
         escritor.writerows(filas)
-    print(f"  Resultados guardados en {ruta.relative_to(RAIZ)}")
+    print(f"  Resultados guardados en {ruta.name}")
     return ruta
 
 
@@ -399,29 +439,35 @@ def escenario_compensacion() -> Dict[str, Any]:
 
 
 def escenario_circuito(n: int = 10, sin_patron: bool = False, modo: str = "lenta-caida") -> Dict[str, Any]:
+    """Mismo protocolo con y sin patrón: mismas fases, mismas pausas y la misma solicitud final."""
     nombre = "Circuit Breaker " + ("DESACTIVADO" if sin_patron else "ACTIVO")
     falla = {"lenta-caida": "lenta y luego caída", "latencia": "lenta", "error": "caída"}[modo]
     titulo(f"Escenario 3: Elegibilidad {falla} -> {nombre}")
     levantar(cb=not sin_patron, bulkhead=True, recrear=("bff",))
     jornada = f"EXP-CB-{'SIN' if sin_patron else 'CON'}-{MARCA}"
     crear_jornada(jornada, n + 1)
+    antes, desde = estado_resiliencia(), marca_tiempo_docker()
 
     fases = {"latencia": [("lenta", n)], "error": [("caida", n)],
              "lenta-caida": [("lenta", n // 2), ("caida", n - n // 2)]}[modo]
+    pausa = CB_RECUPERACION_S + 1
     filas: List[Dict[str, Any]] = []
+    por_fase: List[Dict[str, Any]] = []
     aperturas = 0
-    for fase, cantidad in fases:
+    for numero_fase, (fase, cantidad) in enumerate(fases):
+        resetear_caos()
         if fase == "lenta":
-            print(f"  >> Elegibilidad LENTA: {LATENCIA_CAOS_S:.0f} s por respuesta (timeout de la Saga: 3.5 s)")
-            resetear_caos()
+            print(f"  >> Fase LENTA: Elegibilidad tarda {LATENCIA_CAOS_S:.0f} s (timeout de la Saga: 3.5 s)")
             latencia_elegibilidad(LATENCIA_CAOS_S)
         else:
-            print("  >> Elegibilidad CAÍDA: responde HTTP 500")
-            resetear_caos()
+            print("  >> Fase CAÍDA: Elegibilidad responde HTTP 500")
             falla_elegibilidad(True)
-            if filas and not sin_patron:
-                print(f"     Esperando {CB_RECUPERACION_S} s: el circuito pasa a SEMIABIERTO y prueba una llamada")
-                time.sleep(CB_RECUPERACION_S + 1)
+        if numero_fase > 0:
+            print(f"     Pausa de {pausa} s (igual con y sin patrón)"
+                  + ("" if sin_patron else ": el circuito pasa a SEMIABIERTO y prueba una llamada"))
+            time.sleep(pausa)
+        llamadas_antes = estado_resiliencia()["bulkhead"]["admitidas"]
+        inicio_fase = len(filas)
         for _ in range(cantidad):
             i = len(filas) + 1
             r = agendar(f"CB-{MARCA}-{int(sin_patron)}-{i}", jornada, f"cb-{MARCA}-{int(sin_patron)}-{i}")
@@ -433,58 +479,64 @@ def escenario_circuito(n: int = 10, sin_patron: bool = False, modo: str = "lenta
                 aperturas = cb["aperturas"]
             fila(i, r, f"  | circuito: {estado_cb}{evento}")
             filas.append({"n": i, "fase": fase, **r, "circuito": estado_cb})
+        llamadas = estado_resiliencia()["bulkhead"]["admitidas"] - llamadas_antes
+        segundos = sum(f["segundos"] for f in filas[inicio_fase:])
+        por_fase.append({"fase": "caída" if fase == "caida" else fase, "solicitudes": cantidad, "segundos": round(segundos, 2),
+                         "llamadas_elegibilidad": llamadas})
 
-    metricas = estado_resiliencia()
-    llamadas_reales = metricas["bulkhead"]["admitidas"]
     resetear_caos()
-    recuperacion = None
-    if not sin_patron:
-        print(f"  >> Elegibilidad reparada. Esperando {CB_RECUPERACION_S} s de recuperación del circuito...")
-        time.sleep(CB_RECUPERACION_S + 1)
-        r = agendar(f"CB-{MARCA}-rec", jornada, f"cb-{MARCA}-rec")
-        recuperacion = estado_resiliencia()["circuit_breaker"]["estado"]
-        fila(n + 1, r, f"  | circuito: {recuperacion} (llamada de prueba OK)")
-        filas.append({"n": n + 1, "fase": "recuperada", **r, "circuito": recuperacion})
+    print(f"  >> Elegibilidad reparada. Pausa de {pausa} s (igual con y sin patrón) y una solicitud más")
+    time.sleep(pausa)
+    r = agendar(f"CB-{MARCA}-{int(sin_patron)}-rec", jornada, f"cb-{MARCA}-{int(sin_patron)}-rec")
+    cb = estado_resiliencia()["circuit_breaker"]
+    recuperacion = cb["estado"] if cb["activo"] else "DESACTIVADO"
+    fila(n + 1, r, f"  | circuito: {recuperacion}" + ("" if sin_patron else " (llamada de prueba OK)"))
+    filas.append({"n": n + 1, "fase": "reparada", **r, "circuito": recuperacion})
 
+    for f in por_fase:
+        print(f"  Fase {f['fase']:<6}: {f['solicitudes']} solicitudes en {f['segundos']:.2f} s | "
+              f"llamadas que llegaron a Elegibilidad: {f['llamadas_elegibilidad']} de {f['solicitudes']}")
     latencias = [f["segundos"] for f in filas[:n]]
     total = sum(latencias)
-    print(f"  Tiempo total de {n} solicitudes: {total:.2f} s | promedio: {statistics.mean(latencias):.2f} s")
-    print(f"  Llamadas que llegaron a Elegibilidad: {llamadas_reales} de {n}"
-          + ("" if sin_patron else
-             f" | rechazadas al instante por el circuito: {metricas['circuit_breaker']['rechazos_fail_fast']}"
-             f" | aperturas: {metricas['circuit_breaker']['aperturas']}"))
+    llamadas_total = sum(f["llamadas_elegibilidad"] for f in por_fase)
+    print(f"  Total: {n} solicitudes en {total:.2f} s | promedio {statistics.mean(latencias):.2f} s | "
+          f"{llamadas_total} llamadas a Elegibilidad")
+    guardar_evidencia_resiliencia(f"3_circuito_{'sin' if sin_patron else 'con'}-patron", antes, desde)
     consistencia = verificar_consistencia(jornada)
     guardar_csv(f"3_circuito_{'sin' if sin_patron else 'con'}-patron", filas)
     fallback = sum(f["resultado"] == "PENDIENTE_VALIDACION" for f in filas[:n])
+    detalle_fases = "; ".join(f"{f['fase']} {f['segundos']:.1f} s, {f['llamadas_elegibilidad']}/{f['solicitudes']} a Elegibilidad"
+                              for f in por_fase)
     return {"escenario": f"3. {nombre}", "solicitudes": n,
-            "resultado": f"{fallback}/{n} fallback, total {total:.1f} s, "
-                         f"{llamadas_reales} llamadas a Elegibilidad",
+            "resultado": f"{fallback}/{n} fallback | {detalle_fases}",
             "latencia_prom_s": round(statistics.mean(latencias), 3),
             "consistente": consistencia["consistente"],
-            "ok": fallback == n and consistencia["consistente"]
-                  and (sin_patron or recuperacion == "CERRADO")}
+            "ok": (fallback == n and consistencia["consistente"] and r["resultado"] == "CONFIRMADA"
+                   and (sin_patron or recuperacion == "CERRADO"))}
 
 
-def escenario_bulkhead(n: int = 60, sin_patron: bool = False) -> Dict[str, Any]:
+def escenario_bulkhead(n: int = 60, sin_patron: bool = False, consultas: int = 5) -> Dict[str, Any]:
     nombre = "Bulkhead " + ("DESACTIVADO" if sin_patron else "ACTIVO")
     titulo(f"Escenario 3b: {n} solicitudes simultáneas con Elegibilidad lenta -> {nombre}")
-    # El CB se apaga para aislar el efecto del Bulkhead.
+    print("  (Circuit Breaker apagado en ambas corridas para aislar el efecto del Bulkhead)")
     levantar(cb=False, bulkhead=not sin_patron, recrear=("bff",))
     jornada = f"EXP-BH-{'SIN' if sin_patron else 'CON'}-{MARCA}"
     crear_jornada(jornada, n)
+    antes, desde = estado_resiliencia(), marca_tiempo_docker()
     print(f"  >> Elegibilidad LENTA: {LATENCIA_CAOS_S:.0f} s por respuesta")
     latencia_elegibilidad(LATENCIA_CAOS_S)
     token()
 
-    print(f"  >> Lanzando {n} agendamientos a la vez y midiendo, durante la carga, otra función")
-    print("     (resumen de donante) por el gateway y directo en el BFF")
-    with ThreadPoolExecutor(max_workers=n + 4) as pool:
+    print(f"  >> Lanzando {n} agendamientos a la vez y, 0,5 s después, {consultas} consultas simultáneas")
+    print("     a otra función (resumen de donante) por el gateway, más una directa en el BFF")
+    with ThreadPoolExecutor(max_workers=n + consultas + 2) as pool:
         futuros = [pool.submit(agendar, f"BH-{MARCA}-{int(sin_patron)}-{i}", jornada,
                                f"bh-{MARCA}-{int(sin_patron)}-{i}") for i in range(n)]
         time.sleep(0.5)
         directo = pool.submit(resumen_directo_bff, "11.111.111-1")
-        por_gateway = [resumen_donante("11.111.111-1") for _ in range(3)]
+        futuros_resumen = [pool.submit(resumen_donante, "11.111.111-1") for _ in range(consultas)]
         resultados = [f.result() for f in futuros]
+        por_gateway = [f.result() for f in futuros_resumen]
         lat_bff = directo.result()
 
     metricas = estado_resiliencia()["bulkhead"]
@@ -494,11 +546,12 @@ def escenario_bulkhead(n: int = 60, sin_patron: bool = False) -> Dict[str, Any]:
     print(f"  Agendamientos: p50 {percentil(latencias, 50):.2f} s | p95 {percentil(latencias, 95):.2f} s | "
           f"máx {max(latencias):.2f} s | HTTP: "
           + ", ".join(f"{c}x{sum(r['http'] == c for r in resultados)}" for c in sorted({r['http'] for r in resultados})))
-    print(f"  Resumen de donante durante la carga: por gateway {', '.join(f'{s:.2f} s' for s in lat_gateway)} | "
-          f"directo en el BFF {lat_bff:.2f} s")
+    print(f"  Resumen de donante durante la carga: por gateway {', '.join(f'{s:.2f} s' for s in lat_gateway)} "
+          f"(promedio {statistics.mean(lat_gateway):.2f} s) | directo en el BFF {lat_bff:.2f} s")
     print(f"  Llamadas simultáneas a Elegibilidad (máximo observado): {metricas['max_en_curso_observado']}"
           + (f" (límite del Bulkhead: {metricas['max_concurrentes']}) | rechazadas al instante: {metricas['rechazadas']}"
              if not sin_patron else " (sin límite)"))
+    guardar_evidencia_resiliencia(f"3b_bulkhead_{'sin' if sin_patron else 'con'}-patron", antes, desde)
     consistencia = verificar_consistencia(jornada)
     filas = [{"n": i + 1, **r} for i, r in enumerate(resultados)]
     filas += [{"n": f"resumen-gateway-{i + 1}", "http": c, "segundos": s, "resultado": "resumen"}
@@ -509,7 +562,7 @@ def escenario_bulkhead(n: int = 60, sin_patron: bool = False) -> Dict[str, Any]:
                                    and metricas["rechazadas"] > 0)
     return {"escenario": f"3b. {nombre}", "solicitudes": n,
             "resultado": f"p50 {percentil(latencias, 50):.2f} s, máx simultáneas {metricas['max_en_curso_observado']}, "
-                         f"resumen BFF {lat_bff:.2f} s",
+                         f"resumen prom. {statistics.mean(lat_gateway):.2f} s",
             "latencia_prom_s": round(statistics.mean(latencias), 3),
             "consistente": consistencia["consistente"],
             "ok": consistencia["consistente"] and contencion_ok and all(r["http"] == 201 for r in resultados)}
@@ -595,7 +648,7 @@ def main() -> int:
             imprimir_tabla(resumenes)
     finally:
         restaurar()
-        print(f"Salida completa en {(RESULTADOS / 'salida.txt').relative_to(RAIZ)}")
+        print(f"Salida completa y archivos de la corrida en experimentos/resultados/{MARCA}/")
         sys.stdout = sys.stdout.consola
         salida.close()
     return 0 if resumenes and all(r["ok"] for r in resumenes) else 1

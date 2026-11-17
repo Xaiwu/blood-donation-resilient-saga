@@ -1,7 +1,0 @@
-n,http,segundos,resultado,id_saga,cita_id,idempotente
-1,201,0.044,CONFIRMADA,315df6a3-2181-52ec-90ec-86adabc6c38f,cita-487c510a0ef2,False
-2,201,0.027,CONFIRMADA,4e22aff1-7f68-58b3-af64-4b14eea3e41a,cita-f279ae2ac84a,False
-3,201,0.026,CONFIRMADA,77ac1438-cfee-597d-9784-e2d2f65f9985,cita-bd8fa804ac63,False
-4,201,0.025,CONFIRMADA,caffd6ea-5ebf-53ac-b708-457a1b40e569,cita-bb517b96a500,False
-5,201,0.026,CONFIRMADA,1f2fc28b-c1aa-545c-9761-9587aa59d84c,cita-6c0304af0668,False
-reintento,201,0.025,CONFIRMADA,315df6a3-2181-52ec-90ec-86adabc6c38f,cita-487c510a0ef2,True
