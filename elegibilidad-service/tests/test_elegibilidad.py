@@ -1,11 +1,10 @@
-"""Pruebas unitarias de validación clínica e inyección de caos para elegibilidad-service."""
-
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import sys
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -15,6 +14,7 @@ from src.caos import (
     FallaSimuladaError,
     _parse_codigo_falla,
     _parse_float,
+    aplicar_caos,
     configurar_falla,
     configurar_latencia,
     obtener_estado_caos,
@@ -101,19 +101,18 @@ class TestElegibilidadLogicaYCaos(unittest.TestCase):
         self.assertEqual(_parse_float("invalido", 0.0), 0.0)
         self.assertEqual(_parse_float("999", 0.0), 60.0)
 
-    @patch("src.caos.time.sleep")
-    def test_inyeccion_latencia_y_falla_simulada(self, mock_sleep) -> None:
-        """Verifica que el simulador de caos aplique time.sleep y lance FallaSimuladaError cuando se activa."""
+    @patch("src.caos.asyncio.sleep", new_callable=AsyncMock)
+    def test_inyeccion_latencia_y_falla_simulada(self, mock_sleep: AsyncMock) -> None:
+        """Verifica que el simulador de caos aplique asyncio.sleep y lance FallaSimuladaError cuando se activa."""
         configurar_latencia(4.5)
         self.assertEqual(obtener_estado_caos()["latencia_segundos"], 4.5)
 
-        res = evaluar_elegibilidad("12.345.678-9", edad=25, peso_kg=68.0, id_saga="saga-lenta")
-        self.assertTrue(res["apto"])
-        mock_sleep.assert_called_once_with(4.5)
+        asyncio.run(aplicar_caos("saga-lenta"))
+        mock_sleep.assert_awaited_once_with(4.5)
 
         configurar_falla(True, codigo_falla=503)
         with self.assertRaises(FallaSimuladaError) as ctx:
-            evaluar_elegibilidad("12.345.678-9", id_saga="saga-caida")
+            asyncio.run(aplicar_caos("saga-caida"))
         self.assertEqual(ctx.exception.codigo_falla, 503)
 
         resetear_caos()
@@ -145,7 +144,7 @@ class TestElegibilidadLogicaYCaos(unittest.TestCase):
 
 
 class TestElegibilidadEndpoints(unittest.TestCase):
-    """Pruebas de contrato HTTP con TestClient para validación y endpoints de caos."""
+    """Pruebas de contrato HTTP con TestClient para validación, errores 400 vs 422 y endpoints de caos."""
 
     def setUp(self) -> None:
         resetear_caos()
@@ -154,8 +153,8 @@ class TestElegibilidadEndpoints(unittest.TestCase):
     def tearDown(self) -> None:
         resetear_caos()
 
-    def test_contrato_http_validar_apto_y_no_apto_422(self) -> None:
-        """Verifica respuestas HTTP 200 (apto) y 422 (no apto con apto=False) compatibles con la Saga."""
+    def test_contrato_http_validar_apto_200_no_apto_422_e_invalido_400(self) -> None:
+        """Verifica 200 (apto), 422 (no apto clínico) y 400 (error de esquema/validación de entrada)."""
         resp_ok = self.client.post(
             "/elegibilidad/validar",
             json={"rut_donante": "12.345.678-9", "edad": 30, "peso_kg": 70.0},
@@ -174,22 +173,29 @@ class TestElegibilidadEndpoints(unittest.TestCase):
         self.assertFalse(resp_no_apto.json()["apto"])
         self.assertEqual(resp_no_apto.json()["estado"], "NO_APTO")
 
-    @patch("src.caos.time.sleep")
-    def test_endpoints_caos_latencia_falla_y_rechazos_422(self, mock_sleep) -> None:
-        """Verifica los endpoints /config/* y el rechazo 422 ante parámetros faltantes o inválidos."""
+        # Body malformado o rut_donante vacío responde 400 Bad Request (no 422)
+        resp_invalido = self.client.post(
+            "/elegibilidad/validar",
+            json={"rut_donante": ""},
+        )
+        self.assertEqual(resp_invalido.status_code, 400)
+
+    @patch("src.caos.asyncio.sleep", new_callable=AsyncMock)
+    def test_endpoints_caos_latencia_falla_y_rechazos_400(self, mock_sleep: AsyncMock) -> None:
+        """Verifica los endpoints /config/* asíncronos y el rechazo 400 ante parámetros faltantes o inválidos."""
         # 1. Configurar latencia en /config/latencia
         r_lat = self.client.post("/config/latencia", json={"latencia_segundos": 5.0})
         self.assertEqual(r_lat.status_code, 200)
         self.assertEqual(r_lat.json()["latencia_segundos"], 5.0)
 
-        # Rechazo 422 si no se envía valor o si la latencia es negativa
-        self.assertEqual(self.client.post("/config/latencia").status_code, 422)
-        self.assertEqual(self.client.post("/config/latencia", json={}).status_code, 422)
-        self.assertEqual(self.client.post("/config/latencia", json={"latencia_segundos": -2.0}).status_code, 422)
+        # Rechazo 400 si no se envía valor o si la latencia es negativa
+        self.assertEqual(self.client.post("/config/latencia").status_code, 400)
+        self.assertEqual(self.client.post("/config/latencia", json={}).status_code, 400)
+        self.assertEqual(self.client.post("/config/latencia", json={"latencia_segundos": -2.0}).status_code, 400)
 
         r_val = self.client.post("/elegibilidad/validar", json={"rut_donante": "12.345.678-9"})
         self.assertEqual(r_val.status_code, 200)
-        mock_sleep.assert_called_once_with(5.0)
+        mock_sleep.assert_awaited_once_with(5.0)
 
         # 2. Activar falla HTTP 503 en /config/falla y consultar GET /config
         r_falla = self.client.post("/config/falla", json={"simular_falla": True, "codigo_falla": 503})
@@ -201,9 +207,9 @@ class TestElegibilidadEndpoints(unittest.TestCase):
         self.assertEqual(r_cfg.status_code, 200)
         self.assertEqual(r_cfg.json()["codigo_falla"], 503)
 
-        # Rechazo 422 si el código de falla no es 5xx
+        # Rechazo 400 si el código de falla no es 5xx
         r_falla_inv = self.client.post("/config/falla", json={"simular_falla": True, "codigo_falla": 400})
-        self.assertEqual(r_falla_inv.status_code, 422)
+        self.assertEqual(r_falla_inv.status_code, 400)
 
         r_caido = self.client.post("/elegibilidad/validar", json={"rut_donante": "12.345.678-9"})
         self.assertEqual(r_caido.status_code, 503)

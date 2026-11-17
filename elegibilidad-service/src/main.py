@@ -1,6 +1,7 @@
 import math
 from typing import Any, Dict, Optional
 from fastapi import FastAPI, Header, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from src.caos import (
@@ -57,11 +58,9 @@ def evaluar_elegibilidad(
     id_saga: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Evalúa la aptitud clínica de un donante aplicando primero las reglas de caos activas.
+    Evalúa la aptitud clínica de un donante según historial médico, edad y peso.
     Si el donante no cumple los requisitos médicos, lanza DonanteNoAptoError (HTTP 422).
     """
-    aplicar_caos(id_saga=id_saga)
-
     rut_limpio = rut_donante.strip()
     if not rut_limpio or not normalizar_rut(rut_limpio):
         motivo = "El identificador 'rut_donante' no contiene caracteres alfanuméricos válidos."
@@ -109,6 +108,19 @@ app = FastAPI(
 app.include_router(caos_router)
 
 
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(_req: Request, exc: RequestValidationError) -> JSONResponse:
+    """Responde 400 ante errores de formato/esquema para reservar el 422 al rechazo clínico."""
+    return JSONResponse(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        content={
+            "ok": False,
+            "error": "SOLICITUD_INVALIDA",
+            "detail": exc.errors(),
+        },
+    )
+
+
 @app.exception_handler(DonanteNoAptoError)
 async def no_apto_handler(_req: Request, exc: DonanteNoAptoError) -> JSONResponse:
     return JSONResponse(
@@ -139,7 +151,7 @@ async def falla_simulada_handler(_req: Request, exc: FallaSimuladaError) -> JSON
 
 
 @app.get("/health", status_code=status.HTTP_200_OK)
-def healthcheck() -> Dict[str, Any]:
+async def healthcheck() -> Dict[str, Any]:
     return {
         "status": "ok",
         "service": "elegibilidad-service",
@@ -148,12 +160,13 @@ def healthcheck() -> Dict[str, Any]:
 
 
 @app.post("/elegibilidad/validar", response_model=ValidarElegibilidadResponse, status_code=status.HTTP_200_OK)
-def endpoint_validar_elegibilidad(
+async def endpoint_validar_elegibilidad(
     payload: ValidarElegibilidadRequest,
     x_saga_id: Optional[str] = Header(default=None, alias="X-Saga-ID"),
 ) -> ValidarElegibilidadResponse:
     """Valida si el donante es apto para donar sangre (200 si es apto, 422 si no es apto, 500 si hay falla simulada)."""
     saga_id = (payload.id_saga or x_saga_id or "").strip() or None
+    await aplicar_caos(id_saga=saga_id)
     resultado = evaluar_elegibilidad(
         rut_donante=payload.rut_donante,
         edad=payload.edad,

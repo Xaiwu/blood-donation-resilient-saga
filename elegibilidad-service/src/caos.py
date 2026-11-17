@@ -1,8 +1,8 @@
+import asyncio
 import logging
 import math
 import os
 import threading
-import time
 from typing import Any, Dict, Optional
 from fastapi import APIRouter, HTTPException, status
 
@@ -96,7 +96,7 @@ class _ControladorCaos:
         logger.info("[ELEGIBILIDAD] [CAOS] Parámetros de caos restablecidos a operación normal")
         return self.estado("Configuración de caos restablecida a valores normales.")
 
-    def aplicar(self, id_saga: Optional[str] = None) -> None:
+    async def aplicar(self, id_saga: Optional[str] = None) -> None:
         with self._lock:
             latencia = self._latencia_segundos
             falla = self._simular_falla
@@ -104,7 +104,7 @@ class _ControladorCaos:
 
         if latencia > 0:
             logger.warning("[ELEGIBILIDAD] [CAOS] Demorando respuesta %.2fs | saga=%s", latencia, id_saga or "N/A")
-            time.sleep(latencia)
+            await asyncio.sleep(latencia)
 
         if falla:
             logger.error("[ELEGIBILIDAD] [CAOS] Forzando falla HTTP %d | saga=%s", codigo, id_saga or "N/A")
@@ -137,34 +137,34 @@ def resetear_caos() -> Dict[str, Any]:
     return _caos.resetear()
 
 
-def aplicar_caos(id_saga: Optional[str] = None) -> None:
-    """Ejecuta la demora artificial y/o lanza FallaSimuladaError según la configuración activa."""
-    _caos.aplicar(id_saga=id_saga)
+async def aplicar_caos(id_saga: Optional[str] = None) -> None:
+    """Ejecuta la demora artificial asíncrona y/o lanza FallaSimuladaError según la configuración activa."""
+    await _caos.aplicar(id_saga=id_saga)
 
 
 router = APIRouter(tags=["Inyección de Caos"])
 
 
 @router.get("/config", response_model=EstadoCaosResponse, status_code=status.HTTP_200_OK)
-def endpoint_obtener_config() -> EstadoCaosResponse:
+async def endpoint_obtener_config() -> EstadoCaosResponse:
     """Consulta el estado actual de latencia e inyección de fallas."""
     return EstadoCaosResponse(**obtener_estado_caos())
 
 
 @router.post("/config/latencia", response_model=EstadoCaosResponse, status_code=status.HTTP_200_OK)
-def endpoint_configurar_latencia(payload: ConfigurarLatenciaRequest) -> EstadoCaosResponse:
+async def endpoint_configurar_latencia(payload: ConfigurarLatenciaRequest) -> EstadoCaosResponse:
     """Configura la demora artificial (en segundos) para probar Timeouts y Bulkhead."""
     try:
         return EstadoCaosResponse(**configurar_latencia(payload.latencia_segundos))
     except ValueError as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
 
 
 @router.post("/config/falla", response_model=EstadoCaosResponse, status_code=status.HTTP_200_OK)
-def endpoint_configurar_falla(
+async def endpoint_configurar_falla(
     payload: Optional[ConfigurarFallaRequest] = None,
 ) -> EstadoCaosResponse:
     """Activa o desactiva la simulación de caída (HTTP 500/503) para probar Circuit Breaker y Fallback."""
@@ -174,12 +174,12 @@ def endpoint_configurar_falla(
         return EstadoCaosResponse(**configurar_falla(activa=activa, codigo_falla=codigo))
     except ValueError as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
 
 
 @router.post("/config/reset", response_model=EstadoCaosResponse, status_code=status.HTTP_200_OK)
-def endpoint_resetear_caos() -> EstadoCaosResponse:
+async def endpoint_resetear_caos() -> EstadoCaosResponse:
     """Restablece el servicio a su operación normal sin latencia ni fallas."""
     return EstadoCaosResponse(**resetear_caos())
