@@ -1,0 +1,8 @@
+escenario,solicitudes,resultado,latencia_prom_s,consistente,ok
+1. Camino feliz,6,"5/5 CONFIRMADA, reintento sin duplicar: sí",0.03,True,True
+2. Compensación,4,3/3 compensadas como se esperaba (incluye anular -> liberar),0.868,True,True
+3. Circuit Breaker ACTIVO,10,"10/10 fallback, total 10.1 s, 4 llamadas a Elegibilidad",1.015,True,True
+3. Circuit Breaker DESACTIVADO,10,"10/10 fallback, total 16.5 s, 10 llamadas a Elegibilidad",1.65,True,True
+3b. Bulkhead ACTIVO,60,"p50 0.34 s, máx simultáneas 5, resumen BFF 0.04 s",0.553,True,True
+3b. Bulkhead DESACTIVADO,60,"p50 3.50 s, máx simultáneas 40, resumen BFF 2.63 s",4.52,True,True
+Rate limit (gateway),20,"14 aceptadas, 6 con 429",0.012,True,True

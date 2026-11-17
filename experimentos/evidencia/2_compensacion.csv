@@ -1,0 +1,5 @@
+n,caso,http,segundos,resultado,id_saga,cita_id,idempotente,compensaciones,estado_cupo,estado_cita
+1,registro_500,500,0.038,"Falla al registrar cita en registro-service (500): {""ok"":false,""error"":""SERVICIO_REGISTRO_CAIDO"",""detail"":""Servicio de registro no disponible (falla HTTP 500 simulada).""}. Transacción compensada y cupo liberado.",cfab5cbb-77b3-5a21-b578-ce2408bac96d,,,liberar_cupo,LIBERADO,
+2,registro_incierto,500,3.276,"Falla de conectividad/timeout con registro-service: HTTPConnectionPool(host='registro-service', port=5003): Read timed out. (read timeout=3.5). Transacción compensada y cupo liberado.",a2bd07e7-a80e-50c4-842d-b85946df9b86,,,anular_registro -> liberar_cupo,LIBERADO,ANULADA
+3,no_apto,422,0.058,Donante no apto clínicamente para donación. Transacción compensada y cupo liberado.,6ace58d5-897b-5ef2-a422-8aa892a210b4,,,liberar_cupo,LIBERADO,
+4,recuperado,201,0.1,CONFIRMADA,444addc2-0b7a-5530-9800-a7e2d668fc69,cita-073d9daba3c7,False,,,
