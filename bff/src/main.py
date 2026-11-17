@@ -7,7 +7,7 @@ import logging
 from typing import Optional
 
 import requests
-from fastapi import FastAPI, Header, status
+from fastapi import FastAPI, Header, HTTPException, status
 
 from .models import RespuestaAgendarDonacion, ResumenDonante, SolicitudAgendarDonacion
 from .saga import (
@@ -108,40 +108,57 @@ def obtener_resumen_donante(
         try:
             url = f"{REGISTRO_SERVICE_URL}/registro/donantes/{rut}"
             r = requests.get(url, headers=headers, timeout=4.0)
-            return r.json() if r.status_code == 200 and r.content else []
+            if r.status_code == 200:
+                datos = r.json() if r.content else []
+                return (datos if isinstance(datos, list) else []), None
+            msg = f"registro-service respondió HTTP {r.status_code}"
+            logger.warning("Error consultando citas de donante en registro: %s", msg)
+            return [], msg
         except requests.RequestException as e:
+            msg = f"registro-service no disponible ({type(e).__name__})"
             logger.warning("Error consultando citas de donante en registro: %s", str(e))
-            return []
+            return [], msg
 
     def _consultar_cupos():
         try:
             url = f"{CUPOS_SERVICE_URL}/cupos/donante/{rut}"
             r = requests.get(url, headers=headers, timeout=4.0)
-            return r.json() if r.status_code == 200 and r.content else []
+            if r.status_code == 200:
+                datos = r.json() if r.content else []
+                return (datos if isinstance(datos, list) else []), None
+            msg = f"cupos-service respondió HTTP {r.status_code}"
+            logger.warning("Error consultando cupos de donante en cupos: %s", msg)
+            return [], msg
         except requests.RequestException as e:
+            msg = f"cupos-service no disponible ({type(e).__name__})"
             logger.warning("Error consultando cupos de donante en cupos: %s", str(e))
-            return []
+            return [], msg
 
     # Consulta concurrente utilizando ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=2) as executor:
         futuro_citas = executor.submit(_consultar_registro)
         futuro_cupos = executor.submit(_consultar_cupos)
-        citas_historicas = futuro_citas.result()
-        cupos_activos = futuro_cupos.result()
+        citas_historicas, error_registro = futuro_citas.result()
+        cupos_activos, error_cupos = futuro_cupos.result()
 
-    proxima_cita = (
-        citas_historicas[0]
-        if (citas_historicas and isinstance(citas_historicas, list))
-        else None
-    )
+    advertencias = [err for err in (error_registro, error_cupos) if err is not None]
+    if error_registro is not None and error_cupos is not None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Servicios de registro y cupos no disponibles: " + "; ".join(advertencias),
+        )
+
+    ultima_cita = citas_historicas[0] if citas_historicas else None
 
     return ResumenDonante(
         rut=rut,
-        nombre=proxima_cita.get("nombre_donante") if proxima_cita else None,
-        citas_historicas=citas_historicas if isinstance(citas_historicas, list) else [],
-        cupos_activos=cupos_activos if isinstance(cupos_activos, list) else [],
-        proxima_cita=proxima_cita,
+        nombre=ultima_cita.get("nombre_donante") if ultima_cita else None,
+        citas_historicas=citas_historicas,
+        cupos_activos=cupos_activos,
+        ultima_cita=ultima_cita,
         estado_elegibilidad_reciente=(
-            proxima_cita.get("estado_elegibilidad") if proxima_cita else None
+            ultima_cita.get("estado_elegibilidad") if ultima_cita else None
         ),
+        datos_parciales=bool(advertencias),
+        advertencias=advertencias,
     )
