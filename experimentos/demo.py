@@ -5,17 +5,18 @@ Uso (con Docker Desktop abierto, desde la raíz del repositorio):
 
     python experimentos/demo.py feliz
     python experimentos/demo.py compensacion
-    python experimentos/demo.py circuito                 # con Circuit Breaker
+    python experimentos/demo.py circuito                 # Elegibilidad lenta y luego caída, con CB
     python experimentos/demo.py circuito --sin-patron    # mismo experimento sin CB
-    python experimentos/demo.py bulkhead                 # con Bulkhead
+    python experimentos/demo.py bulkhead                 # carga simultánea con Elegibilidad lenta
     python experimentos/demo.py bulkhead --sin-patron    # mismo experimento sin Bulkhead
+    python experimentos/demo.py ratelimit                # ráfaga contra el gateway (HTTP 429)
     python experimentos/demo.py todos                    # todo lo anterior + tabla comparativa
 
 El script levanta el sistema con la configuración que necesita cada escenario,
 activa las fallas con los endpoints de caos (por `docker compose exec`, sin
 exponer puertos), manda las solicitudes por el gateway con JWT, verifica la
-consistencia entre Cupos y Registro y guarda los resultados en
-experimentos/resultados/*.csv. Solo usa la biblioteca estándar de Python.
+consistencia entre Cupos y Registro y guarda la salida y los CSV en
+experimentos/resultados/<fecha>/. Solo usa la biblioteca estándar de Python.
 """
 
 import argparse
@@ -28,21 +29,23 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 RAIZ = Path(__file__).resolve().parent.parent
-RESULTADOS = Path(__file__).resolve().parent / "resultados"
 GATEWAY = os.getenv("GATEWAY_URL", "http://localhost:8080")
 USUARIO = os.getenv("USUARIO_ESCRITURA", "operador")
 CLAVE = os.getenv("CLAVE_ESCRITURA", "operador123")
 
-LATENCIA_CAOS_S = 5.0        # mayor que SAGA_STEP_TIMEOUT (3.5 s): la Saga corta por timeout
-CB_RECUPERACION_S = 10       # valor por defecto en docker-compose.yml
+LATENCIA_CAOS_S = 5.0         # mayor que SAGA_STEP_TIMEOUT (3.5 s): la Saga corta por timeout
+CB_RECUPERACION_S = 10        # valor por defecto en docker-compose.yml
+RATE_LIMIT_POR_DEFECTO = 15   # valor por defecto en docker-compose.yml
 RUT_NO_APTO = "00.000.000-0"  # historial clínico no apto en el mock de Elegibilidad
 
 MARCA = time.strftime("%Y%m%d-%H%M%S")
+RESULTADOS = Path(__file__).resolve().parent / "resultados" / MARCA
 _CONSTRUIDO = False
 
 
@@ -71,25 +74,27 @@ def http_interno(servicio: str, puerto: int, metodo: str, ruta: str, cuerpo: Opt
         f"d = {datos!r}\n"
         f"req = urllib.request.Request('http://localhost:{puerto}{ruta}', data=d.encode() if d else None, "
         f"method={metodo!r}, headers={{'Content-Type': 'application/json'}})\n"
-        "print(urllib.request.urlopen(req, timeout=10).read().decode())"
+        "print(urllib.request.urlopen(req, timeout=30).read().decode())"
     )
     return json.loads(python_en(servicio, codigo))
 
 
-def levantar(cb: bool = True, bulkhead: bool = True, reiniciar_bff: bool = False) -> None:
-    """Levanta el sistema con los patrones pedidos y sin rate limit que limite la carga."""
+def levantar(cb: bool = True, bulkhead: bool = True, rate_limit: int = 100000,
+             recrear: Tuple[str, ...] = ()) -> None:
+    """Levanta el sistema con los patrones pedidos. `recrear` reinicia contadores en memoria."""
+    limite = "normal" if rate_limit == RATE_LIMIT_POR_DEFECTO else "sin límite"
     print(f"  Configurando sistema: Circuit Breaker={'ON' if cb else 'OFF'}, "
-          f"Bulkhead={'ON' if bulkhead else 'OFF'}...")
+          f"Bulkhead={'ON' if bulkhead else 'OFF'}, rate limit {limite}...")
     env = {
         "CB_ACTIVO": str(cb).lower(),
         "BULKHEAD_ACTIVO": str(bulkhead).lower(),
-        "RATE_LIMIT_RPM": "100000",
+        "RATE_LIMIT_RPM": str(rate_limit),
     }
     global _CONSTRUIDO
     compose("up", "-d", "--wait", *([] if _CONSTRUIDO else ["--build"]), env=env)
     _CONSTRUIDO = True
-    if reiniciar_bff:  # contadores del CB y del Bulkhead en cero
-        compose("up", "-d", "--wait", "--force-recreate", "bff", env=env)
+    if recrear:
+        compose("up", "-d", "--wait", "--force-recreate", *recrear, env=env)
     resetear_caos()
 
 
@@ -116,8 +121,23 @@ def falla_registro(activa: bool) -> None:
     http_interno("registro-service", 5003, "POST", "/config/falla", {"simular_falla": activa})
 
 
+def respuesta_tardia_registro(segundos: float) -> None:
+    http_interno("registro-service", 5003, "POST", "/config/latencia", {"latencia_segundos": segundos})
+
+
 def estado_resiliencia() -> Dict[str, Any]:
     return http_interno("bff", 5000, "GET", "/resiliencia/estado")
+
+
+def resumen_directo_bff(rut: str) -> float:
+    """Mide el resumen llamando al BFF desde dentro de la red, sin pasar por el gateway."""
+    salida = python_en("bff", (
+        "import time, urllib.request\n"
+        "t = time.perf_counter()\n"
+        f"urllib.request.urlopen('http://localhost:5000/api/v1/donantes/{rut}/resumen', timeout=60).read()\n"
+        "print(round(time.perf_counter() - t, 3))"
+    ))
+    return float(salida.strip())
 
 
 def crear_jornada(id_jornada: str, capacidad: int) -> None:
@@ -130,6 +150,19 @@ def crear_jornada(id_jornada: str, capacidad: int) -> None:
         f"({id_jornada!r}, 'Experimento ABET 6', '2026-12-01', {capacidad}, {capacidad}))\n"
         "c.commit()"
     ))
+
+
+def estado_en_bases(id_saga: str) -> Tuple[Optional[str], Optional[str]]:
+    """Devuelve (estado del cupo en Cupos, estado de la cita en Registro) para un id_saga."""
+    consulta = (
+        "import os, sqlite3\n"
+        "c = sqlite3.connect(os.environ['DATABASE_PATH'])\n"
+        "r = c.execute('SELECT estado FROM {tabla} WHERE id_saga = ?', ({id_saga!r},)).fetchone()\n"
+        "print(r[0] if r else '-')"
+    )
+    cupo = python_en("cupos-service", consulta.format(tabla="cupos", id_saga=id_saga)).strip()
+    cita = python_en("registro-service", consulta.format(tabla="citas_donacion", id_saga=id_saga)).strip()
+    return (None if cupo == "-" else cupo), (None if cita == "-" else cita)
 
 
 def verificar_consistencia(id_jornada: str) -> Dict[str, Any]:
@@ -156,31 +189,43 @@ def verificar_consistencia(id_jornada: str) -> Dict[str, Any]:
             "reservados": len(reservados), "citas_activas": len(activas)}
 
 
+def orden_compensaciones(id_saga: str) -> List[str]:
+    """Lee en el log del BFF las compensaciones que ejecutó la Saga, en el orden en que corrieron."""
+    marca = f"[SAGA {id_saga}] Ejecutando compensación: "
+    lineas = compose("logs", "--no-log-prefix", "--since", "10m", "bff").splitlines()
+    return [linea.split(marca, 1)[1].strip() for linea in lineas if marca in linea]
+
+
+def id_saga_de(clave: str) -> str:
+    """Misma derivación que el BFF (UUIDv5 de la Idempotency-Key)."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, clave))
+
+
 # ---------------------------------------------------------------- cliente del gateway
 
 def _http(metodo: str, url: str, cuerpo: Optional[dict] = None, headers: Optional[dict] = None,
-          timeout: float = 60) -> Tuple[int, Any]:
+          timeout: float = 120) -> Tuple[int, Any, Dict[str, str]]:
     datos = json.dumps(cuerpo).encode() if cuerpo is not None else None
     req = urllib.request.Request(url, data=datos, method=metodo,
                                  headers={"Content-Type": "application/json", **(headers or {})})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status, json.loads(r.read().decode() or "null")
+            return r.status, json.loads(r.read().decode() or "null"), dict(r.headers)
     except urllib.error.HTTPError as e:
         cuerpo_err = e.read().decode()
         try:
-            return e.code, json.loads(cuerpo_err)
+            return e.code, json.loads(cuerpo_err), dict(e.headers)
         except ValueError:
-            return e.code, cuerpo_err
+            return e.code, cuerpo_err, dict(e.headers)
 
 
 _TOKEN: Optional[str] = None
 
 
-def token() -> str:
+def token(nuevo: bool = False) -> str:
     global _TOKEN
-    if _TOKEN is None:
-        codigo, datos = _http("POST", f"{GATEWAY}/auth/token", {"usuario": USUARIO, "clave": CLAVE})
+    if _TOKEN is None or nuevo:
+        codigo, datos, _ = _http("POST", f"{GATEWAY}/auth/token", {"usuario": USUARIO, "clave": CLAVE})
         if codigo != 200:
             raise RuntimeError(f"No se pudo obtener el JWT ({codigo}): {datos}")
         _TOKEN = datos["access_token"]
@@ -189,36 +234,56 @@ def token() -> str:
 
 def agendar(rut: str, id_jornada: str, clave: str) -> Dict[str, Any]:
     t0 = time.perf_counter()
-    codigo, datos = _http(
+    codigo, datos, _ = _http(
         "POST", f"{GATEWAY}/api/v1/donaciones/agendar",
         {"rut_donante": rut, "nombre_donante": "Donante Experimento", "id_jornada": id_jornada,
          "horario": "10:00", "edad": 30, "peso_kg": 70.0},
         {"Authorization": f"Bearer {token()}", "Idempotency-Key": clave},
     )
     segundos = time.perf_counter() - t0
+    registro = datos.get("registro") if isinstance(datos, dict) else None
     if isinstance(datos, dict) and "estado" in datos:
         resultado = datos["estado"]
     else:
         detalle = datos.get("detail") if isinstance(datos, dict) else datos
         resultado = str(detalle)
     return {"http": codigo, "segundos": round(segundos, 3), "resultado": resultado,
-            "id_saga": datos.get("id_saga") if isinstance(datos, dict) else None}
+            "id_saga": id_saga_de(clave),
+            "cita_id": (registro or {}).get("cita_id"),
+            "idempotente": (registro or {}).get("idempotente")}
 
 
 def resumen_donante(rut: str) -> Tuple[int, float]:
     t0 = time.perf_counter()
-    codigo, _ = _http("GET", f"{GATEWAY}/api/v1/donantes/{rut}/resumen",
-                      headers={"Authorization": f"Bearer {token()}"})
+    codigo, _, _ = _http("GET", f"{GATEWAY}/api/v1/donantes/{rut}/resumen",
+                         headers={"Authorization": f"Bearer {token()}"})
     return codigo, round(time.perf_counter() - t0, 3)
 
 
 # ---------------------------------------------------------------- utilidades de salida
 
+class _Duplicador:
+    """Escribe la salida en la consola y en experimentos/resultados/<fecha>/salida.txt."""
+
+    def __init__(self, consola, archivo) -> None:
+        self.consola, self.archivo = consola, archivo
+
+    def write(self, texto: str) -> int:
+        self.consola.write(texto)
+        self.archivo.write(texto)
+        return len(texto)
+
+    def flush(self) -> None:
+        self.consola.flush()
+        self.archivo.flush()
+
+
 def guardar_csv(nombre: str, filas: List[Dict[str, Any]]) -> Path:
-    RESULTADOS.mkdir(exist_ok=True)
-    ruta = RESULTADOS / f"{nombre}_{MARCA}.csv"
+    RESULTADOS.mkdir(parents=True, exist_ok=True)
+    ruta = RESULTADOS / f"{nombre}.csv"
+    campos = list(dict.fromkeys(k for f in filas for k in f))
     with ruta.open("w", newline="", encoding="utf-8") as f:
-        escritor = csv.DictWriter(f, fieldnames=list(filas[0].keys()))
+        escritor = csv.DictWriter(f, fieldnames=campos)
         escritor.writeheader()
         escritor.writerows(filas)
     print(f"  Resultados guardados en {ruta.relative_to(RAIZ)}")
@@ -232,7 +297,7 @@ def percentil(valores: List[float], p: float) -> float:
 
 
 def titulo(texto: str) -> None:
-    print(f"\n{'=' * 72}\n{texto}\n{'=' * 72}")
+    print(f"\n{'=' * 78}\n{texto}\n{'=' * 78}")
 
 
 def corto(texto: str) -> str:
@@ -245,175 +310,244 @@ def corto(texto: str) -> str:
     return texto[:70]
 
 
-def fila(i: int, r: Dict[str, Any], extra: str = "") -> None:
-    print(f"  #{i:<3} HTTP {r['http']}  {r['segundos']:>6.2f} s  {corto(r['resultado'])}{extra}")
+def fila(i: Any, r: Dict[str, Any], extra: str = "") -> None:
+    print(f"  #{str(i):<3} HTTP {r['http']}  {r['segundos']:>6.2f} s  {corto(r['resultado'])}{extra}")
 
 
 # ---------------------------------------------------------------- escenarios
 
 def escenario_feliz(n: int = 5) -> Dict[str, Any]:
-    titulo("Escenario 1: Camino feliz")
+    titulo("Escenario 1: Camino feliz e idempotencia")
     levantar()
     jornada = f"EXP-FELIZ-{MARCA}"
     crear_jornada(jornada, n)
     filas = []
     for i in range(n):
         r = agendar(f"FELIZ-{MARCA}-{i}", jornada, f"feliz-{MARCA}-{i}")
-        fila(i + 1, r)
+        fila(i + 1, r, f"  | cita {r['cita_id']}")
         filas.append({"n": i + 1, **r})
 
+    print("  >> Reintento de la solicitud #1 con la misma Idempotency-Key")
     reintento = agendar(f"FELIZ-{MARCA}-0", jornada, f"feliz-{MARCA}-0")
-    misma = reintento["id_saga"] == filas[0]["id_saga"]
-    print(f"  Reintento con la misma Idempotency-Key: HTTP {reintento['http']} "
-          f"{'-> misma cita, sin duplicar' if misma else '-> [X] distinta'}")
+    misma_cita = reintento["cita_id"] is not None and reintento["cita_id"] == filas[0]["cita_id"]
+    print(f"  #R   HTTP {reintento['http']}  {reintento['segundos']:>6.2f} s  {reintento['resultado']}  "
+          f"| cita {reintento['cita_id']} | Registro informa idempotente={reintento['idempotente']}")
+    sin_duplicar = misma_cita and reintento["idempotente"] is True
+    print(f"  Idempotencia: {'[OK] misma cita y Registro la reconoce como reintento' if sin_duplicar else '[X] se creó otra cita'}")
+    filas.append({"n": "reintento", **reintento})
 
     consistencia = verificar_consistencia(jornada)
-    guardar_csv("feliz", filas)
-    ok = all(f["resultado"] == "CONFIRMADA" for f in filas) and misma and consistencia["consistente"]
-    return {"escenario": "1. Camino feliz", "solicitudes": n,
-            "resultado": f"{sum(f['resultado'] == 'CONFIRMADA' for f in filas)}/{n} CONFIRMADA",
-            "latencia_prom_s": round(statistics.mean(f["segundos"] for f in filas), 3),
+    guardar_csv("1_feliz", filas)
+    ok = (all(f["resultado"] == "CONFIRMADA" for f in filas[:n]) and sin_duplicar
+          and consistencia["consistente"] and consistencia["disponibles"] == 0)
+    return {"escenario": "1. Camino feliz", "solicitudes": n + 1,
+            "resultado": f"{sum(f['resultado'] == 'CONFIRMADA' for f in filas[:n])}/{n} CONFIRMADA, "
+                         f"reintento sin duplicar: {'sí' if sin_duplicar else 'NO'}",
+            "latencia_prom_s": round(statistics.mean(f["segundos"] for f in filas[:n]), 3),
             "consistente": consistencia["consistente"], "ok": ok}
 
 
-def escenario_compensacion(n: int = 3) -> Dict[str, Any]:
-    titulo("Escenario 2: Falla en Registro -> compensación inversa (se libera el cupo)")
+def escenario_compensacion() -> Dict[str, Any]:
+    titulo("Escenario 2: Fallas en la Saga -> compensación en orden inverso")
     levantar()
     jornada = f"EXP-COMP-{MARCA}"
-    crear_jornada(jornada, n)
-    filas = []
+    crear_jornada(jornada, 2)
+    filas: List[Dict[str, Any]] = []
+    casos_ok = []
 
-    print("  >> Inyectando falla HTTP 500 en registro-service")
+    def caso(nombre: str, rut: str, clave: str, esperado: List[str], estados: Tuple[Any, Any]) -> None:
+        r = agendar(rut, jornada, clave)
+        orden = orden_compensaciones(r["id_saga"])
+        cupo, cita = estado_en_bases(r["id_saga"])
+        fila(len(filas) + 1, r)
+        print(f"       compensaciones ejecutadas: {' -> '.join(orden) or 'ninguna'} | "
+              f"cupo: {cupo or 'no existe'} | cita: {cita or 'no existe'}")
+        casos_ok.append(orden == esperado and (cupo, cita) == estados)
+        filas.append({"n": len(filas) + 1, "caso": nombre, **r, "compensaciones": " -> ".join(orden),
+                      "estado_cupo": cupo, "estado_cita": cita})
+
+    print("  >> A) Registro cae (HTTP 500, no graba): la Saga sabe que no se registró y solo libera el cupo")
     falla_registro(True)
-    for i in range(n):
-        r = agendar(f"COMP-{MARCA}-{i}", jornada, f"comp-{MARCA}-{i}")
-        fila(i + 1, r)
-        filas.append({"n": i + 1, "caso": "falla_registro", **r})
+    caso("registro_500", f"COMP-{MARCA}-A", f"comp-{MARCA}-A", ["liberar_cupo"], ("LIBERADO", None))
+    resetear_caos()
 
-    print(f"  >> Donante no apto ({RUT_NO_APTO}): Elegibilidad responde 422")
-    r = agendar(RUT_NO_APTO, jornada, f"comp-noapto-{MARCA}")
-    fila(n + 1, r)
-    filas.append({"n": n + 1, "caso": "no_apto", **r})
+    print(f"  >> B) Registro graba pero responde en {LATENCIA_CAOS_S:.0f} s (timeout de la Saga: 3.5 s): "
+          "resultado incierto")
+    print("     La Saga compensa en orden inverso: primero anula el registro, luego libera el cupo")
+    respuesta_tardia_registro(LATENCIA_CAOS_S)
+    caso("registro_incierto", f"COMP-{MARCA}-B", f"comp-{MARCA}-B",
+         ["anular_registro", "liberar_cupo"], ("LIBERADO", "ANULADA"))
+    resetear_caos()
+
+    print(f"  >> C) Donante no apto ({RUT_NO_APTO}): Elegibilidad responde 422 y se libera el cupo")
+    caso("no_apto", RUT_NO_APTO, f"comp-{MARCA}-C", ["liberar_cupo"], ("LIBERADO", None))
 
     consistencia = verificar_consistencia(jornada)
-    print("  >> Quitando la falla y agendando de nuevo")
-    falla_registro(False)
+    print("  >> Sin fallas: el sistema vuelve a agendar normalmente")
     r = agendar(f"COMP-{MARCA}-ok", jornada, f"comp-{MARCA}-ok")
-    fila(n + 2, r)
-    filas.append({"n": n + 2, "caso": "recuperado", **r})
+    fila(len(filas) + 1, r)
+    filas.append({"n": len(filas) + 1, "caso": "recuperado", **r})
     final = verificar_consistencia(jornada)
 
-    guardar_csv("compensacion", filas)
-    compensadas = sum("compensada" in f["resultado"] for f in filas[:-1])
-    ok = (consistencia["disponibles"] == consistencia["capacidad"] and consistencia["consistente"]
-          and final["consistente"] and filas[-1]["resultado"] == "CONFIRMADA")
-    return {"escenario": "2. Compensación", "solicitudes": n + 2,
-            "resultado": f"{compensadas}/{n + 1} compensadas, stock restituido",
+    guardar_csv("2_compensacion", filas)
+    ok = (all(casos_ok) and consistencia["disponibles"] == consistencia["capacidad"]
+          and consistencia["consistente"] and final["consistente"] and r["resultado"] == "CONFIRMADA")
+    return {"escenario": "2. Compensación", "solicitudes": len(filas),
+            "resultado": f"{sum(casos_ok)}/3 compensadas como se esperaba (incluye anular -> liberar)",
             "latencia_prom_s": round(statistics.mean(f["segundos"] for f in filas), 3),
             "consistente": consistencia["consistente"] and final["consistente"], "ok": ok}
 
 
-def escenario_circuito(n: int = 10, sin_patron: bool = False, modo: str = "latencia") -> Dict[str, Any]:
+def escenario_circuito(n: int = 10, sin_patron: bool = False, modo: str = "lenta-caida") -> Dict[str, Any]:
     nombre = "Circuit Breaker " + ("DESACTIVADO" if sin_patron else "ACTIVO")
-    titulo(f"Escenario 3: Elegibilidad cae ({modo}) -> {nombre}")
-    levantar(cb=not sin_patron, bulkhead=True, reiniciar_bff=True)
+    falla = {"lenta-caida": "lenta y luego caída", "latencia": "lenta", "error": "caída"}[modo]
+    titulo(f"Escenario 3: Elegibilidad {falla} -> {nombre}")
+    levantar(cb=not sin_patron, bulkhead=True, recrear=("bff",))
     jornada = f"EXP-CB-{'SIN' if sin_patron else 'CON'}-{MARCA}"
     crear_jornada(jornada, n + 1)
 
-    if modo == "latencia":
-        print(f"  >> Inyectando latencia de {LATENCIA_CAOS_S:.0f} s en elegibilidad-service "
-              "(timeout de la Saga: 3.5 s)")
-        latencia_elegibilidad(LATENCIA_CAOS_S)
-    else:
-        print("  >> Inyectando falla HTTP 500 en elegibilidad-service")
-        falla_elegibilidad(True)
+    fases = {"latencia": [("lenta", n)], "error": [("caida", n)],
+             "lenta-caida": [("lenta", n // 2), ("caida", n - n // 2)]}[modo]
+    filas: List[Dict[str, Any]] = []
+    aperturas = 0
+    for fase, cantidad in fases:
+        if fase == "lenta":
+            print(f"  >> Elegibilidad LENTA: {LATENCIA_CAOS_S:.0f} s por respuesta (timeout de la Saga: 3.5 s)")
+            resetear_caos()
+            latencia_elegibilidad(LATENCIA_CAOS_S)
+        else:
+            print("  >> Elegibilidad CAÍDA: responde HTTP 500")
+            resetear_caos()
+            falla_elegibilidad(True)
+            if filas and not sin_patron:
+                print(f"     Esperando {CB_RECUPERACION_S} s: el circuito pasa a SEMIABIERTO y prueba una llamada")
+                time.sleep(CB_RECUPERACION_S + 1)
+        for _ in range(cantidad):
+            i = len(filas) + 1
+            r = agendar(f"CB-{MARCA}-{int(sin_patron)}-{i}", jornada, f"cb-{MARCA}-{int(sin_patron)}-{i}")
+            cb = estado_resiliencia()["circuit_breaker"]
+            estado_cb = cb["estado"] if cb["activo"] else "DESACTIVADO"
+            evento = ""
+            if cb["activo"] and cb["aperturas"] > aperturas:
+                evento = " (se abre)" if aperturas == 0 else " (la llamada de prueba falló: se reabre)"
+                aperturas = cb["aperturas"]
+            fila(i, r, f"  | circuito: {estado_cb}{evento}")
+            filas.append({"n": i, "fase": fase, **r, "circuito": estado_cb})
 
-    filas = []
-    for i in range(n):
-        r = agendar(f"CB-{MARCA}-{int(sin_patron)}-{i}", jornada, f"cb-{MARCA}-{int(sin_patron)}-{i}")
-        cb = estado_resiliencia()["circuit_breaker"]
-        estado_cb = cb["estado"] if cb["activo"] else "DESACTIVADO"
-        fila(i + 1, r, f"  | circuito: {estado_cb}")
-        filas.append({"n": i + 1, **r, "circuito": estado_cb})
-
-    metricas = estado_resiliencia()["circuit_breaker"]
+    metricas = estado_resiliencia()
+    llamadas_reales = metricas["bulkhead"]["admitidas"]
     resetear_caos()
     recuperacion = None
     if not sin_patron:
-        print(f"  >> Falla reparada. Esperando {CB_RECUPERACION_S} s de recuperación del circuito...")
+        print(f"  >> Elegibilidad reparada. Esperando {CB_RECUPERACION_S} s de recuperación del circuito...")
         time.sleep(CB_RECUPERACION_S + 1)
         r = agendar(f"CB-{MARCA}-rec", jornada, f"cb-{MARCA}-rec")
         recuperacion = estado_resiliencia()["circuit_breaker"]["estado"]
         fila(n + 1, r, f"  | circuito: {recuperacion} (llamada de prueba OK)")
-        filas.append({"n": n + 1, **r, "circuito": recuperacion})
+        filas.append({"n": n + 1, "fase": "recuperada", **r, "circuito": recuperacion})
 
     latencias = [f["segundos"] for f in filas[:n]]
     total = sum(latencias)
     print(f"  Tiempo total de {n} solicitudes: {total:.2f} s | promedio: {statistics.mean(latencias):.2f} s")
-    if not sin_patron:
-        print(f"  Llamadas reales a Elegibilidad: {metricas['llamadas']} | "
-              f"rechazadas al instante por el circuito: {metricas['rechazos_fail_fast']}")
+    print(f"  Llamadas que llegaron a Elegibilidad: {llamadas_reales} de {n}"
+          + ("" if sin_patron else
+             f" | rechazadas al instante por el circuito: {metricas['circuit_breaker']['rechazos_fail_fast']}"
+             f" | aperturas: {metricas['circuit_breaker']['aperturas']}"))
     consistencia = verificar_consistencia(jornada)
-    guardar_csv(f"circuito_{'sin' if sin_patron else 'con'}-patron", filas)
+    guardar_csv(f"3_circuito_{'sin' if sin_patron else 'con'}-patron", filas)
     fallback = sum(f["resultado"] == "PENDIENTE_VALIDACION" for f in filas[:n])
     return {"escenario": f"3. {nombre}", "solicitudes": n,
-            "resultado": f"{fallback}/{n} fallback, total {total:.1f} s",
+            "resultado": f"{fallback}/{n} fallback, total {total:.1f} s, "
+                         f"{llamadas_reales} llamadas a Elegibilidad",
             "latencia_prom_s": round(statistics.mean(latencias), 3),
             "consistente": consistencia["consistente"],
             "ok": fallback == n and consistencia["consistente"]
                   and (sin_patron or recuperacion == "CERRADO")}
 
 
-def escenario_bulkhead(n: int = 40, sin_patron: bool = False) -> Dict[str, Any]:
+def escenario_bulkhead(n: int = 60, sin_patron: bool = False) -> Dict[str, Any]:
     nombre = "Bulkhead " + ("DESACTIVADO" if sin_patron else "ACTIVO")
     titulo(f"Escenario 3b: {n} solicitudes simultáneas con Elegibilidad lenta -> {nombre}")
     # El CB se apaga para aislar el efecto del Bulkhead.
-    levantar(cb=False, bulkhead=not sin_patron, reiniciar_bff=True)
+    levantar(cb=False, bulkhead=not sin_patron, recrear=("bff",))
     jornada = f"EXP-BH-{'SIN' if sin_patron else 'CON'}-{MARCA}"
     crear_jornada(jornada, n)
-    print(f"  >> Inyectando latencia de {LATENCIA_CAOS_S:.0f} s en elegibilidad-service")
+    print(f"  >> Elegibilidad LENTA: {LATENCIA_CAOS_S:.0f} s por respuesta")
     latencia_elegibilidad(LATENCIA_CAOS_S)
     token()
 
-    print(f"  >> Lanzando {n} agendamientos a la vez y midiendo otra función (resumen de donante)")
-    with ThreadPoolExecutor(max_workers=n + 1) as pool:
+    print(f"  >> Lanzando {n} agendamientos a la vez y midiendo, durante la carga, otra función")
+    print("     (resumen de donante) por el gateway y directo en el BFF")
+    with ThreadPoolExecutor(max_workers=n + 4) as pool:
         futuros = [pool.submit(agendar, f"BH-{MARCA}-{int(sin_patron)}-{i}", jornada,
                                f"bh-{MARCA}-{int(sin_patron)}-{i}") for i in range(n)]
         time.sleep(0.5)
-        resumenes = [resumen_donante("11.111.111-1") for _ in range(3)]
+        directo = pool.submit(resumen_directo_bff, "11.111.111-1")
+        por_gateway = [resumen_donante("11.111.111-1") for _ in range(3)]
         resultados = [f.result() for f in futuros]
+        lat_bff = directo.result()
 
     metricas = estado_resiliencia()["bulkhead"]
     resetear_caos()
     latencias = [r["segundos"] for r in resultados]
-    lat_resumen = [s for _, s in resumenes]
+    lat_gateway = [s for _, s in por_gateway]
     print(f"  Agendamientos: p50 {percentil(latencias, 50):.2f} s | p95 {percentil(latencias, 95):.2f} s | "
           f"máx {max(latencias):.2f} s | HTTP: "
           + ", ".join(f"{c}x{sum(r['http'] == c for r in resultados)}" for c in sorted({r['http'] for r in resultados})))
-    print(f"  Resumen de donante durante la carga: {', '.join(f'{s:.2f} s' for s in lat_resumen)}")
-    if not sin_patron:
-        print(f"  Bulkhead: máximo {metricas['max_concurrentes']} en curso | admitidas {metricas['admitidas']} | "
-              f"rechazadas al instante {metricas['rechazadas']}")
+    print(f"  Resumen de donante durante la carga: por gateway {', '.join(f'{s:.2f} s' for s in lat_gateway)} | "
+          f"directo en el BFF {lat_bff:.2f} s")
+    print(f"  Llamadas simultáneas a Elegibilidad (máximo observado): {metricas['max_en_curso_observado']}"
+          + (f" (límite del Bulkhead: {metricas['max_concurrentes']}) | rechazadas al instante: {metricas['rechazadas']}"
+             if not sin_patron else " (sin límite)"))
     consistencia = verificar_consistencia(jornada)
     filas = [{"n": i + 1, **r} for i, r in enumerate(resultados)]
-    filas += [{"n": f"resumen-{i + 1}", "http": c, "segundos": s, "resultado": "resumen", "id_saga": ""}
-              for i, (c, s) in enumerate(resumenes)]
-    guardar_csv(f"bulkhead_{'sin' if sin_patron else 'con'}-patron", filas)
+    filas += [{"n": f"resumen-gateway-{i + 1}", "http": c, "segundos": s, "resultado": "resumen"}
+              for i, (c, s) in enumerate(por_gateway)]
+    filas.append({"n": "resumen-bff-directo", "http": 200, "segundos": lat_bff, "resultado": "resumen"})
+    guardar_csv(f"3b_bulkhead_{'sin' if sin_patron else 'con'}-patron", filas)
+    contencion_ok = sin_patron or (metricas["max_en_curso_observado"] <= metricas["max_concurrentes"]
+                                   and metricas["rechazadas"] > 0)
     return {"escenario": f"3b. {nombre}", "solicitudes": n,
-            "resultado": f"p95 {percentil(latencias, 95):.2f} s, resumen máx {max(lat_resumen):.2f} s",
+            "resultado": f"p50 {percentil(latencias, 50):.2f} s, máx simultáneas {metricas['max_en_curso_observado']}, "
+                         f"resumen BFF {lat_bff:.2f} s",
             "latencia_prom_s": round(statistics.mean(latencias), 3),
             "consistente": consistencia["consistente"],
-            "ok": consistencia["consistente"] and all(r["http"] == 201 for r in resultados)}
+            "ok": consistencia["consistente"] and contencion_ok and all(r["http"] == 201 for r in resultados)}
+
+
+def escenario_ratelimit(n: int = 20) -> Dict[str, Any]:
+    titulo(f"Escenario extra: ráfaga de {n} consultas contra el gateway (rate limit de "
+           f"{RATE_LIMIT_POR_DEFECTO} por minuto)")
+    levantar(rate_limit=RATE_LIMIT_POR_DEFECTO, recrear=("api-gateway",))
+    token(nuevo=True)  # también cuenta como petición
+    filas = []
+    for i in range(n):
+        t0 = time.perf_counter()
+        codigo, datos, headers = _http("GET", f"{GATEWAY}/api/v1/donantes/11.111.111-1/resumen",
+                                       headers={"Authorization": f"Bearer {token()}"})
+        segundos = round(time.perf_counter() - t0, 3)
+        reintentar = headers.get("Retry-After") or headers.get("retry-after") or ""
+        filas.append({"n": i + 1, "http": codigo, "segundos": segundos, "retry_after": reintentar})
+    aceptadas = sum(f["http"] == 200 for f in filas)
+    rechazadas = sum(f["http"] == 429 for f in filas)
+    primera = next((f for f in filas if f["http"] == 429), None)
+    print(f"  Aceptadas (200): {aceptadas} | rechazadas (429): {rechazadas}"
+          + (f" | primera 429 en la petición #{primera['n']}, Retry-After {primera['retry_after']} s" if primera else ""))
+    guardar_csv("4_ratelimit", filas)
+    return {"escenario": "Rate limit (gateway)", "solicitudes": n,
+            "resultado": f"{aceptadas} aceptadas, {rechazadas} con 429",
+            "latencia_prom_s": round(statistics.mean(f["segundos"] for f in filas), 3),
+            "consistente": True, "ok": rechazadas > 0}
 
 
 # ---------------------------------------------------------------- main
 
 def imprimir_tabla(resumenes: List[Dict[str, Any]]) -> None:
     titulo("Resumen comparativo")
-    print(f"  {'Escenario':<32} {'Prom. (s)':>9}  {'Consistente':<11}  Resultado")
+    print(f"  {'Escenario':<30} {'Prom. (s)':>9}  {'Consist.':<8}  {'OK':<3}  Resultado")
     for r in resumenes:
-        print(f"  {r['escenario']:<32} {r['latencia_prom_s']:>9.3f}  "
-              f"{'sí' if r['consistente'] else 'NO':<11}  {r['resultado']}")
+        print(f"  {r['escenario']:<30} {r['latencia_prom_s']:>9.3f}  "
+              f"{'sí' if r['consistente'] else 'NO':<8}  {'sí' if r['ok'] else 'NO':<3}  {r['resultado']}")
     guardar_csv("resumen", resumenes)
 
 
@@ -421,24 +555,33 @@ def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description="Experimentos de resiliencia ABET 6")
-    parser.add_argument("escenario", choices=["feliz", "compensacion", "circuito", "bulkhead", "todos"])
+    parser.add_argument("escenario",
+                        choices=["feliz", "compensacion", "circuito", "bulkhead", "ratelimit", "todos"])
     parser.add_argument("--sin-patron", action="store_true", help="Desactiva el patrón evaluado (CB o Bulkhead)")
-    parser.add_argument("--modo", choices=["latencia", "error"], default="latencia",
-                        help="Tipo de falla en Elegibilidad para el escenario circuito")
+    parser.add_argument("--modo", choices=["lenta-caida", "latencia", "error"], default="lenta-caida",
+                        help="Falla de Elegibilidad en el escenario circuito (por defecto: lenta y luego caída)")
     parser.add_argument("-n", type=int, help="Cantidad de solicitudes")
     args = parser.parse_args()
     kw = {"n": args.n} if args.n else {}
+
+    RESULTADOS.mkdir(parents=True, exist_ok=True)
+    salida = (RESULTADOS / "salida.txt").open("w", encoding="utf-8")
+    sys.stdout = _Duplicador(sys.stdout, salida)
+    print(f"Experimentos ABET 6 | {time.strftime('%Y-%m-%d %H:%M:%S')} | escenario: {args.escenario}"
+          f"{' --sin-patron' if args.sin_patron else ''}")
 
     resumenes = []
     try:
         if args.escenario == "feliz":
             resumenes.append(escenario_feliz(**kw))
         elif args.escenario == "compensacion":
-            resumenes.append(escenario_compensacion(**kw))
+            resumenes.append(escenario_compensacion())
         elif args.escenario == "circuito":
             resumenes.append(escenario_circuito(sin_patron=args.sin_patron, modo=args.modo, **kw))
         elif args.escenario == "bulkhead":
             resumenes.append(escenario_bulkhead(sin_patron=args.sin_patron, **kw))
+        elif args.escenario == "ratelimit":
+            resumenes.append(escenario_ratelimit(**kw))
         else:
             resumenes += [
                 escenario_feliz(),
@@ -447,11 +590,15 @@ def main() -> int:
                 escenario_circuito(sin_patron=True),
                 escenario_bulkhead(sin_patron=False),
                 escenario_bulkhead(sin_patron=True),
+                escenario_ratelimit(),
             ]
             imprimir_tabla(resumenes)
     finally:
         restaurar()
-    return 0 if all(r["consistente"] for r in resumenes) else 1
+        print(f"Salida completa en {(RESULTADOS / 'salida.txt').relative_to(RAIZ)}")
+        sys.stdout = sys.stdout.consola
+        salida.close()
+    return 0 if resumenes and all(r["ok"] for r in resumenes) else 1
 
 
 if __name__ == "__main__":
