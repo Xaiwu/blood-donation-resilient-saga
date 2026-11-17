@@ -4,7 +4,7 @@ from typing import AsyncGenerator, Dict, List, Optional
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 
-from src.caos import FallaSimuladaError, aplicar_falla, router as caos_router
+from src.caos import FallaSimuladaError, aplicar_falla, demorar_respuesta, router as caos_router
 from src.db import (
     CitaNoEncontradaError,
     ColisionIdempotenciaError,
@@ -101,6 +101,7 @@ def endpoint_registrar_donacion(
         horario=payload.horario,
         estado_elegibilidad=payload.estado_elegibilidad,
     )
+    demorar_respuesta(id_saga=saga_id)
     response.status_code = status.HTTP_200_OK if resultado.get("idempotente") else status.HTTP_201_CREATED
     return RegistrarDonacionResponse(**resultado)
 

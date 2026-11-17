@@ -213,6 +213,36 @@ class TestRegistroEndpoints(unittest.TestCase):
         r_ok = self.client.post("/registro/donaciones", json=payload, headers={"X-Saga-ID": "saga-caida"})
         self.assertEqual(r_ok.status_code, 201)
 
+    @patch("src.caos.time.sleep")
+    def test_respuesta_tardia_graba_antes_de_demorar(self, mock_sleep) -> None:
+        """Con respuesta tardía, la cita se graba antes de la demora y la anulación posterior la revierte."""
+        payload = {
+            "rut_donante": "12.345.678-9",
+            "nombre_donante": "Ana Pérez",
+            "id_jornada": "JORNADA-01",
+            "horario": "09:00",
+        }
+        self.assertEqual(self.client.post("/config/latencia", json={}).status_code, 422)
+        self.assertEqual(self.client.post("/config/latencia", json={"latencia_segundos": 61}).status_code, 422)
+        r_cfg = self.client.post("/config/latencia", json={"latencia_segundos": 5})
+        self.assertEqual(r_cfg.json()["latencia_respuesta_segundos"], 5.0)
+
+        try:
+            grabado_antes_de_demorar = []
+            mock_sleep.side_effect = lambda _s: grabado_antes_de_demorar.append(
+                len(obtener_citas_donante("12.345.678-9", db_path=self.db_path))
+            )
+            r = self.client.post("/registro/donaciones", json=payload, headers={"X-Saga-ID": "saga-lenta"})
+            self.assertEqual(r.status_code, 201)
+            mock_sleep.assert_called_once_with(5.0)
+            self.assertEqual(grabado_antes_de_demorar, [1])
+
+            self.assertEqual(self.client.post("/registro/donaciones/saga-lenta/anular").status_code, 200)
+            self.assertEqual(len(self.client.get("/registro/donantes/12.345.678-9").json()), 0)
+        finally:
+            r_reset = self.client.post("/config/reset")
+        self.assertEqual(r_reset.json()["latencia_respuesta_segundos"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
