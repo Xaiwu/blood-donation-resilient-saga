@@ -274,20 +274,21 @@ def test_elegibilidad_400_compensa_y_200_apto_false_compensa(
 
 
 @patch("requests.post")
-def test_reintento_idempotente_409_en_registro_no_libera_cupo(
+def test_reintento_idempotente_200_en_registro_no_libera_cupo(
     mock_post, payload_donacion, id_saga_test
 ):
     """
-    Si un reintento con la misma Idempotency-Key recibe 409 de Registro (ya confirmado),
-    la Saga lo trata como éxito idempotente y NO libera el cupo de la donación confirmada.
+    Si un reintento con la misma Idempotency-Key recibe 200 idempotente de Registro,
+    la Saga lo trata como éxito y NO libera el cupo de la donación confirmada.
     """
-    resp_cupos = MagicMock(status_code=200, content=b'{"ok": true}')
+    resp_cupos = MagicMock(status_code=200, content=b'{"ok": true, "idempotente": true}')
+    resp_cupos.json.return_value = {"ok": True, "idempotente": True}
     resp_eleg = MagicMock(status_code=200, content=b'{"apto": true}')
     resp_eleg.json.return_value = {"apto": True}
     resp_reg_dup = MagicMock(
-        status_code=409, content=b'{"cita_id": "cita-99", "duplicado": true}'
+        status_code=200, content=b'{"cita_id": "cita-99", "idempotente": true}'
     )
-    resp_reg_dup.json.return_value = {"cita_id": "cita-99", "duplicado": True}
+    resp_reg_dup.json.return_value = {"cita_id": "cita-99", "idempotente": True}
 
     mock_post.side_effect = [resp_cupos, resp_eleg, resp_reg_dup]
 
@@ -295,6 +296,32 @@ def test_reintento_idempotente_409_en_registro_no_libera_cupo(
 
     assert resultado["estado"] == "CONFIRMADA"
     assert mock_post.call_count == 3  # No se llamó a /cupos/liberar
+
+
+@patch("requests.post")
+def test_colision_409_en_registro_compensa_cupo(
+    mock_post, payload_donacion, id_saga_test
+):
+    """
+    Issue #12: Si Registro responde 409 (colisión de idempotencia con datos distintos),
+    la Saga debe abortar con 409 y compensar liberando el cupo.
+    """
+    resp_cupos = MagicMock(status_code=201, content=b'{"ok": true, "idempotente": false}')
+    resp_cupos.json.return_value = {"ok": True, "idempotente": False}
+    resp_eleg = MagicMock(status_code=200, content=b'{"apto": true}')
+    resp_eleg.json.return_value = {"apto": True}
+    resp_reg_409 = MagicMock(status_code=409, text="Colisión de id_saga")
+    resp_liberar = MagicMock(status_code=200, content=b'{"liberado": true}')
+
+    mock_post.side_effect = [resp_cupos, resp_eleg, resp_reg_409, resp_liberar]
+
+    with pytest.raises(HTTPException) as exc_info:
+        ejecutar_saga_agendamiento(payload_donacion, id_saga_test)
+
+    assert exc_info.value.status_code == 409
+    assert "compensada y cupo liberado" in exc_info.value.detail
+    assert mock_post.call_count == 4
+    assert mock_post.call_args_list[3][0][0] == f"{CUPOS_SERVICE_URL}/cupos/liberar"
 
 
 @patch("saga.time.sleep")
@@ -368,3 +395,62 @@ def test_circuit_breaker_abre_y_degrada_en_saga(mock_post, payload_donacion):
     ]
     assert len(llamadas_eleg) == 3  # la 4ta no tocó Elegibilidad
     assert saga.elegibilidad_resiliente.circuit_breaker.metricas["rechazos_fail_fast"] == 1
+
+
+@patch("requests.post")
+def test_reintento_tras_saga_degradada_no_apto_anula_registro_y_libera_cupo(
+    mock_post, payload_donacion, id_saga_test
+):
+    """
+    Issue #11: Si una Saga previa degradó a PENDIENTE_VALIDACION (cupo reservado y cita creada),
+    y un reintento con la misma Idempotency-Key encuentra a Elegibilidad recuperada respondiendo 422,
+    Cupos responde idempotente=True y la compensación LIFO debe anular la cita previa Y liberar el cupo.
+    """
+    resp_cupos_idem = MagicMock(
+        status_code=200, content=b'{"ok": true, "idempotente": true}'
+    )
+    resp_cupos_idem.json.return_value = {"ok": True, "idempotente": True}
+    resp_eleg_422 = MagicMock(status_code=422, content=b'{"motivo": "No apto"}')
+    resp_anular = MagicMock(status_code=200, content=b'{"anulado": true}')
+    resp_liberar = MagicMock(status_code=200, content=b'{"liberado": true}')
+
+    mock_post.side_effect = [resp_cupos_idem, resp_eleg_422, resp_anular, resp_liberar]
+
+    with pytest.raises(HTTPException) as exc_info:
+        ejecutar_saga_agendamiento(payload_donacion, id_saga_test)
+
+    assert exc_info.value.status_code == 422
+    assert "compensada y cupo liberado" in exc_info.value.detail
+    assert mock_post.call_count == 4
+    assert (
+        mock_post.call_args_list[2][0][0]
+        == f"{REGISTRO_SERVICE_URL}/registro/donaciones/{id_saga_test}/anular"
+    )
+    assert mock_post.call_args_list[3][0][0] == f"{CUPOS_SERVICE_URL}/cupos/liberar"
+
+
+@patch("saga.time.sleep")
+@patch("requests.post")
+def test_timeout_en_reservar_cupo_reintenta_404_y_reporta_fallo_si_no_libera(
+    mock_post, mock_sleep, payload_donacion, id_saga_test
+):
+    """
+    Issue #13: Ante Timeout en Paso 1 (Cupos), la liberación preventiva NO acepta 404 como éxito,
+    reintenta con backoff y, si sigue sin confirmar liberación, reporta fallo de reconciliación.
+    """
+    resp_404 = MagicMock(status_code=404, text="No encontrada aún")
+    mock_post.side_effect = [
+        requests.Timeout("Timeout al reservar"),
+        resp_404,
+        resp_404,
+        resp_404,
+    ]
+
+    with pytest.raises(HTTPException) as exc_info:
+        ejecutar_saga_agendamiento(payload_donacion, id_saga_test)
+
+    assert exc_info.value.status_code == 503
+    assert "falló la liberación preventiva automática" in exc_info.value.detail
+    assert "requiere reconciliación" in exc_info.value.detail
+    assert mock_post.call_count == 4  # 1 reservar timeout + 3 reintentos liberar
+    assert mock_sleep.call_count == 2
