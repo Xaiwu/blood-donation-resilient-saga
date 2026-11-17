@@ -140,3 +140,26 @@ def requiere_escritura(payload: dict = Depends(verificar_token)) -> dict:
             },
         )
     return payload
+
+
+def extraer_identificador_cliente(authorization_header: str | None, ip_cliente: str) -> str:
+    """
+    Obtiene la clave de Rate Limiting priorizando el usuario autenticado ('sub' del JWT)
+    y cayendo a la IP del cliente cuando no hay token o este es inválido.
+    """
+    if authorization_header:
+        partes = authorization_header.strip().split(None, 1)
+        if len(partes) == 2 and partes[0].lower() == "bearer":
+            try:
+                payload = jwt.decode(
+                    partes[1],
+                    JWT_SECRET,
+                    algorithms=[JWT_ALGORITMO],
+                    options={"require": ["exp", "sub", "rol"]},
+                )
+                sub = str(payload.get("sub", "")).strip()
+                if sub:
+                    return f"user:{sub}"
+            except jwt.InvalidTokenError:
+                pass
+    return f"ip:{ip_cliente}"
