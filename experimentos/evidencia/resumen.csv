@@ -1,8 +1,8 @@
 escenario,solicitudes,resultado,latencia_prom_s,consistente,ok
-1. Camino feliz,6,"5/5 CONFIRMADA, reintento sin duplicar: sí",0.039,True,True
-2. Compensación,4,3/3 compensadas como se esperaba (incluye anular -> liberar),0.836,True,True
-3. Circuit Breaker ACTIVO,10,"10/10 fallback | lenta 9.8 s, 3/5 a Elegibilidad; caída 0.1 s, 1/5 a Elegibilidad",0.99,True,True
-3. Circuit Breaker DESACTIVADO,10,"10/10 fallback | lenta 16.1 s, 5/5 a Elegibilidad; caída 0.2 s, 5/5 a Elegibilidad",1.625,True,True
-3b. Bulkhead ACTIVO,60,"p50 0.34 s, máx simultáneas 5, resumen prom. 0.04 s",0.558,True,True
-3b. Bulkhead DESACTIVADO,60,"p50 3.58 s, máx simultáneas 40, resumen prom. 3.05 s",4.565,True,True
-Rate limit (gateway),20,"14 aceptadas, 6 con 429",0.02,True,True
+1. Camino feliz,6,"5/5 CONFIRMADA, reintento sin duplicar: sí",0.038,True,True
+2. Compensación,4,3/3 compensadas como se esperaba (incluye anular -> liberar),0.915,True,True
+3. Circuit Breaker ACTIVO,10,"10/10 fallback | lenta 10.7 s, 3/5 a Elegibilidad; caída 0.2 s, 1/5 a Elegibilidad",1.085,True,True
+3. Circuit Breaker DESACTIVADO,10,"10/10 fallback | lenta 17.9 s, 5/5 a Elegibilidad; caída 0.3 s, 5/5 a Elegibilidad",1.812,True,True
+3b. Bulkhead ACTIVO,60,"p50 0.42 s, máx simultáneas 5, resumen prom. 0.04 s",0.652,True,True
+3b. Bulkhead DESACTIVADO,60,"p50 3.82 s, máx simultáneas 40, resumen prom. 3.31 s",4.958,True,True
+Rate limit (gateway),20,"15 aceptadas, 5 con 429",0.015,True,True
