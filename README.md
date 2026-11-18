@@ -2,8 +2,6 @@
 
 Agendamiento de donaciones de sangre como una **Saga orquestada** entre tres servicios de dominio (Cupos, Elegibilidad y Registro), expuesta por un **API Gateway** y un **BFF**, y protegida con **timeouts, Circuit Breaker y Bulkhead** sobre la dependencia frágil (Elegibilidad).
 
-El diseño, las decisiones y el análisis de la evidencia están en el [informe](docs/informe.md).
-
 ## Arquitectura
 
 ```mermaid
@@ -162,7 +160,6 @@ cupos-service/         Cupos con SQLite (WAL, BEGIN IMMEDIATE, idempotencia por 
 elegibilidad-service/  Validador externo simulado con inyección de caos
 registro-service/      Registro con SQLite e inyección de fallas
 experimentos/          demo.py y evidencia de la corrida de referencia
-docs/informe.md        Informe: decisiones, diagramas y análisis de la evidencia
 ```
 
 ## Equipo
