@@ -4,6 +4,7 @@ from typing import AsyncGenerator, Dict, List, Optional
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 
+from src.caos import FallaSimuladaError, aplicar_falla, demorar_respuesta, router as caos_router
 from src.db import (
     CitaNoEncontradaError,
     ColisionIdempotenciaError,
@@ -33,6 +34,16 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+app.include_router(caos_router)
+
+
+@app.exception_handler(FallaSimuladaError)
+async def falla_simulada_handler(_req: Request, exc: FallaSimuladaError) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.codigo_falla,
+        content={"ok": False, "error": "SERVICIO_REGISTRO_CAIDO", "detail": str(exc)},
+    )
 
 
 @app.exception_handler(ColisionIdempotenciaError)
@@ -81,6 +92,7 @@ def endpoint_registrar_donacion(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Debe enviar 'id_saga' en el body o en la cabecera 'X-Saga-ID'.",
         )
+    aplicar_falla(id_saga=saga_id)
     resultado = registrar_donacion(
         id_saga=saga_id,
         rut_donante=payload.rut_donante,
@@ -89,6 +101,7 @@ def endpoint_registrar_donacion(
         horario=payload.horario,
         estado_elegibilidad=payload.estado_elegibilidad,
     )
+    demorar_respuesta(id_saga=saga_id)
     response.status_code = status.HTTP_200_OK if resultado.get("idempotente") else status.HTTP_201_CREATED
     return RegistrarDonacionResponse(**resultado)
 

@@ -184,6 +184,65 @@ class TestRegistroEndpoints(unittest.TestCase):
             )
             self.assertEqual(resp_check.status_code, 500)
 
+    def test_falla_simulada_no_persiste_ni_bloquea_compensacion(self) -> None:
+        """Con la falla activa, registrar responde 5xx sin guardar; anular, consultar y /health siguen funcionando."""
+        payload = {
+            "rut_donante": "12.345.678-9",
+            "nombre_donante": "Ana Pérez",
+            "id_jornada": "JORNADA-01",
+            "horario": "09:00",
+        }
+        self.client.post("/registro/donaciones", json=payload, headers={"X-Saga-ID": "saga-previa"})
+
+        r_cfg = self.client.post("/config/falla", json={"simular_falla": True, "codigo_falla": 503})
+        self.assertEqual(r_cfg.status_code, 200)
+        self.assertTrue(self.client.get("/config").json()["simular_falla"])
+        self.assertEqual(self.client.post("/config/falla", json={}).status_code, 422)
+
+        try:
+            r_caido = self.client.post("/registro/donaciones", json=payload, headers={"X-Saga-ID": "saga-caida"})
+            self.assertEqual(r_caido.status_code, 503)
+            self.assertEqual(self.client.post("/registro/donaciones/saga-caida/anular").status_code, 404)
+            self.assertEqual(len(self.client.get("/registro/donantes/12.345.678-9").json()), 1)
+            self.assertEqual(self.client.get("/health").status_code, 200)
+            self.assertEqual(self.client.post("/registro/donaciones/saga-previa/anular").status_code, 200)
+        finally:
+            r_reset = self.client.post("/config/reset")
+        self.assertFalse(r_reset.json()["simular_falla"])
+
+        r_ok = self.client.post("/registro/donaciones", json=payload, headers={"X-Saga-ID": "saga-caida"})
+        self.assertEqual(r_ok.status_code, 201)
+
+    @patch("src.caos.time.sleep")
+    def test_respuesta_tardia_graba_antes_de_demorar(self, mock_sleep) -> None:
+        """Con respuesta tardía, la cita se graba antes de la demora y la anulación posterior la revierte."""
+        payload = {
+            "rut_donante": "12.345.678-9",
+            "nombre_donante": "Ana Pérez",
+            "id_jornada": "JORNADA-01",
+            "horario": "09:00",
+        }
+        self.assertEqual(self.client.post("/config/latencia", json={}).status_code, 422)
+        self.assertEqual(self.client.post("/config/latencia", json={"latencia_segundos": 61}).status_code, 422)
+        r_cfg = self.client.post("/config/latencia", json={"latencia_segundos": 5})
+        self.assertEqual(r_cfg.json()["latencia_respuesta_segundos"], 5.0)
+
+        try:
+            grabado_antes_de_demorar = []
+            mock_sleep.side_effect = lambda _s: grabado_antes_de_demorar.append(
+                len(obtener_citas_donante("12.345.678-9", db_path=self.db_path))
+            )
+            r = self.client.post("/registro/donaciones", json=payload, headers={"X-Saga-ID": "saga-lenta"})
+            self.assertEqual(r.status_code, 201)
+            mock_sleep.assert_called_once_with(5.0)
+            self.assertEqual(grabado_antes_de_demorar, [1])
+
+            self.assertEqual(self.client.post("/registro/donaciones/saga-lenta/anular").status_code, 200)
+            self.assertEqual(len(self.client.get("/registro/donantes/12.345.678-9").json()), 0)
+        finally:
+            r_reset = self.client.post("/config/reset")
+        self.assertEqual(r_reset.json()["latencia_respuesta_segundos"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

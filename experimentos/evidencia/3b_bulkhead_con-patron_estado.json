@@ -1,0 +1,52 @@
+{
+  "antes": {
+    "circuit_breaker": {
+      "nombre": "elegibilidad",
+      "activo": false,
+      "estado": "CERRADO",
+      "fallos_consecutivos": 0,
+      "umbral_fallos": 3,
+      "tiempo_recuperacion_s": 10.0,
+      "llamadas": 0,
+      "exitos": 0,
+      "fallos": 0,
+      "rechazos_fail_fast": 0,
+      "aperturas": 0
+    },
+    "bulkhead": {
+      "nombre": "elegibilidad",
+      "activo": true,
+      "max_concurrentes": 5,
+      "max_espera_s": 0.0,
+      "en_curso": 0,
+      "admitidas": 0,
+      "rechazadas": 0,
+      "max_en_curso_observado": 0
+    }
+  },
+  "despues": {
+    "circuit_breaker": {
+      "nombre": "elegibilidad",
+      "activo": false,
+      "estado": "CERRADO",
+      "fallos_consecutivos": 0,
+      "umbral_fallos": 3,
+      "tiempo_recuperacion_s": 10.0,
+      "llamadas": 0,
+      "exitos": 0,
+      "fallos": 0,
+      "rechazos_fail_fast": 0,
+      "aperturas": 0
+    },
+    "bulkhead": {
+      "nombre": "elegibilidad",
+      "activo": true,
+      "max_concurrentes": 5,
+      "max_espera_s": 0.0,
+      "en_curso": 0,
+      "admitidas": 5,
+      "rechazadas": 55,
+      "max_en_curso_observado": 5
+    }
+  }
+}

@@ -1,0 +1,145 @@
+Experimentos ABET 6 | 2026-11-17 00:14:39 | escenario: todos
+
+==============================================================================
+Escenario 1: Camino feliz e idempotencia
+==============================================================================
+  Configurando sistema: Circuit Breaker=ON, Bulkhead=ON, rate limit sin límite...
+  #1   HTTP 201    0.05 s  CONFIRMADA  | cita cita-1cfe34faa8de
+  #2   HTTP 201    0.03 s  CONFIRMADA  | cita cita-37d960754bcb
+  #3   HTTP 201    0.03 s  CONFIRMADA  | cita cita-c6d149cee50c
+  #4   HTTP 201    0.05 s  CONFIRMADA  | cita cita-214517f3cdc2
+  #5   HTTP 201    0.04 s  CONFIRMADA  | cita cita-73dc98a8b723
+  >> Reintento de la solicitud #1 con la misma Idempotency-Key
+  #R   HTTP 201    0.06 s  CONFIRMADA  | cita cita-1cfe34faa8de | Registro informa idempotente=True
+  Idempotencia: [OK] misma cita y Registro la reconoce como reintento
+  Consistencia: stock 0/5 disponible | cupos reservados: 5 | citas activas: 5 | [OK] Cupos y Registro coinciden
+  Resultados guardados en 1_feliz.csv
+
+==============================================================================
+Escenario 2: Fallas en la Saga -> compensación en orden inverso
+==============================================================================
+  Configurando sistema: Circuit Breaker=ON, Bulkhead=ON, rate limit sin límite...
+  >> A) Registro cae (HTTP 500, no graba): la Saga sabe que no se registró y solo libera el cupo
+  #1   HTTP 500    0.04 s  Falla al registrar cita en registro-service (500) -> compensada, cupo liberado
+       compensaciones ejecutadas: liberar_cupo | cupo: LIBERADO | cita: no existe
+  >> B) Registro graba pero responde en 5 s (timeout de la Saga: 3.5 s): resultado incierto
+     La Saga compensa en orden inverso: primero anula el registro, luego libera el cupo
+  #2   HTTP 500    3.24 s  Falla de conectividad/timeout con registro-service -> compensada, cupo liberado
+       compensaciones ejecutadas: anular_registro -> liberar_cupo | cupo: LIBERADO | cita: ANULADA
+  >> C) Donante no apto (00.000.000-0): Elegibilidad responde 422 y se libera el cupo
+  #3   HTTP 422    0.03 s  Donante no apto clínicamente para donación -> compensada, cupo liberado
+       compensaciones ejecutadas: liberar_cupo | cupo: LIBERADO | cita: no existe
+  Consistencia: stock 2/2 disponible | cupos reservados: 0 | citas activas: 0 | [OK] Cupos y Registro coinciden
+  >> Sin fallas: el sistema vuelve a agendar normalmente
+  #4   HTTP 201    0.03 s  CONFIRMADA
+  Consistencia: stock 1/2 disponible | cupos reservados: 1 | citas activas: 1 | [OK] Cupos y Registro coinciden
+  Resultados guardados en 2_compensacion.csv
+
+==============================================================================
+Escenario 3: Elegibilidad lenta y luego caída -> Circuit Breaker ACTIVO
+==============================================================================
+  Configurando sistema: Circuit Breaker=ON, Bulkhead=ON, rate limit sin límite...
+  >> Fase LENTA: Elegibilidad tarda 5 s (timeout de la Saga: 3.5 s)
+  #1   HTTP 201    3.23 s  PENDIENTE_VALIDACION  | circuito: CERRADO
+  #2   HTTP 201    3.23 s  PENDIENTE_VALIDACION  | circuito: CERRADO
+  #3   HTTP 201    3.22 s  PENDIENTE_VALIDACION  | circuito: ABIERTO (se abre)
+  #4   HTTP 201    0.04 s  PENDIENTE_VALIDACION  | circuito: ABIERTO
+  #5   HTTP 201    0.04 s  PENDIENTE_VALIDACION  | circuito: ABIERTO
+  >> Fase CAÍDA: Elegibilidad responde HTTP 500
+     Pausa de 11 s (igual con y sin patrón): el circuito pasa a SEMIABIERTO y prueba una llamada
+  #6   HTTP 201    0.04 s  PENDIENTE_VALIDACION  | circuito: ABIERTO (la llamada de prueba falló: se reabre)
+  #7   HTTP 201    0.03 s  PENDIENTE_VALIDACION  | circuito: ABIERTO
+  #8   HTTP 201    0.03 s  PENDIENTE_VALIDACION  | circuito: ABIERTO
+  #9   HTTP 201    0.02 s  PENDIENTE_VALIDACION  | circuito: ABIERTO
+  #10  HTTP 201    0.03 s  PENDIENTE_VALIDACION  | circuito: ABIERTO
+  >> Elegibilidad reparada. Pausa de 11 s (igual con y sin patrón) y una solicitud más
+  #11  HTTP 201    0.04 s  CONFIRMADA  | circuito: CERRADO (llamada de prueba OK)
+  Fase lenta : 5 solicitudes en 9.75 s | llamadas que llegaron a Elegibilidad: 3 de 5
+  Fase caída : 5 solicitudes en 0.15 s | llamadas que llegaron a Elegibilidad: 1 de 5
+  Total: 10 solicitudes en 9.90 s | promedio 0.99 s | 4 llamadas a Elegibilidad
+  Eventos del BFF: transiciones del circuito: CERRADO->ABIERTO, ABIERTO->SEMIABIERTO, SEMIABIERTO->ABIERTO, ABIERTO->SEMIABIERTO, SEMIABIERTO->CERRADO | rechazos del bulkhead: 0
+  Evidencia guardada en 3_circuito_con-patron_estado.json y 3_circuito_con-patron_eventos.jsonl
+  Consistencia: stock 0/11 disponible | cupos reservados: 11 | citas activas: 11 | [OK] Cupos y Registro coinciden
+  Resultados guardados en 3_circuito_con-patron.csv
+
+==============================================================================
+Escenario 3: Elegibilidad lenta y luego caída -> Circuit Breaker DESACTIVADO
+==============================================================================
+  Configurando sistema: Circuit Breaker=OFF, Bulkhead=ON, rate limit sin límite...
+  >> Fase LENTA: Elegibilidad tarda 5 s (timeout de la Saga: 3.5 s)
+  #1   HTTP 201    3.22 s  PENDIENTE_VALIDACION  | circuito: DESACTIVADO
+  #2   HTTP 201    3.21 s  PENDIENTE_VALIDACION  | circuito: DESACTIVADO
+  #3   HTTP 201    3.21 s  PENDIENTE_VALIDACION  | circuito: DESACTIVADO
+  #4   HTTP 201    3.22 s  PENDIENTE_VALIDACION  | circuito: DESACTIVADO
+  #5   HTTP 201    3.22 s  PENDIENTE_VALIDACION  | circuito: DESACTIVADO
+  >> Fase CAÍDA: Elegibilidad responde HTTP 500
+     Pausa de 11 s (igual con y sin patrón)
+  #6   HTTP 201    0.04 s  PENDIENTE_VALIDACION  | circuito: DESACTIVADO
+  #7   HTTP 201    0.03 s  PENDIENTE_VALIDACION  | circuito: DESACTIVADO
+  #8   HTTP 201    0.03 s  PENDIENTE_VALIDACION  | circuito: DESACTIVADO
+  #9   HTTP 201    0.03 s  PENDIENTE_VALIDACION  | circuito: DESACTIVADO
+  #10  HTTP 201    0.04 s  PENDIENTE_VALIDACION  | circuito: DESACTIVADO
+  >> Elegibilidad reparada. Pausa de 11 s (igual con y sin patrón) y una solicitud más
+  #11  HTTP 201    0.05 s  CONFIRMADA  | circuito: DESACTIVADO
+  Fase lenta : 5 solicitudes en 16.09 s | llamadas que llegaron a Elegibilidad: 5 de 5
+  Fase caída : 5 solicitudes en 0.16 s | llamadas que llegaron a Elegibilidad: 5 de 5
+  Total: 10 solicitudes en 16.25 s | promedio 1.62 s | 10 llamadas a Elegibilidad
+  Eventos del BFF: transiciones del circuito: ninguna | rechazos del bulkhead: 0
+  Evidencia guardada en 3_circuito_sin-patron_estado.json y 3_circuito_sin-patron_eventos.jsonl
+  Consistencia: stock 0/11 disponible | cupos reservados: 11 | citas activas: 11 | [OK] Cupos y Registro coinciden
+  Resultados guardados en 3_circuito_sin-patron.csv
+
+==============================================================================
+Escenario 3b: 60 solicitudes simultáneas con Elegibilidad lenta -> Bulkhead ACTIVO
+==============================================================================
+  (Circuit Breaker apagado en ambas corridas para aislar el efecto del Bulkhead)
+  Configurando sistema: Circuit Breaker=OFF, Bulkhead=ON, rate limit sin límite...
+  >> Elegibilidad LENTA: 5 s por respuesta
+  >> Lanzando 60 agendamientos a la vez y, 0,5 s después, 5 consultas simultáneas
+     a otra función (resumen de donante) por el gateway, más una directa en el BFF
+  Agendamientos: p50 0.34 s | p95 3.27 s | máx 3.28 s | HTTP: 201x60
+  Resumen de donante durante la carga: por gateway 0.04 s, 0.04 s, 0.04 s, 0.04 s, 0.04 s (promedio 0.04 s) | directo en el BFF 0.03 s
+  Llamadas simultáneas a Elegibilidad (máximo observado): 5 (límite del Bulkhead: 5) | rechazadas al instante: 55
+  Eventos del BFF: transiciones del circuito: ninguna | rechazos del bulkhead: 55
+  Evidencia guardada en 3b_bulkhead_con-patron_estado.json y 3b_bulkhead_con-patron_eventos.jsonl
+  Consistencia: stock 0/60 disponible | cupos reservados: 60 | citas activas: 60 | [OK] Cupos y Registro coinciden
+  Resultados guardados en 3b_bulkhead_con-patron.csv
+
+==============================================================================
+Escenario 3b: 60 solicitudes simultáneas con Elegibilidad lenta -> Bulkhead DESACTIVADO
+==============================================================================
+  (Circuit Breaker apagado en ambas corridas para aislar el efecto del Bulkhead)
+  Configurando sistema: Circuit Breaker=OFF, Bulkhead=OFF, rate limit sin límite...
+  >> Elegibilidad LENTA: 5 s por respuesta
+  >> Lanzando 60 agendamientos a la vez y, 0,5 s después, 5 consultas simultáneas
+     a otra función (resumen de donante) por el gateway, más una directa en el BFF
+  Agendamientos: p50 3.58 s | p95 6.83 s | máx 6.85 s | HTTP: 201x60
+  Resumen de donante durante la carga: por gateway 3.04 s, 3.05 s, 3.05 s, 3.06 s, 3.08 s (promedio 3.05 s) | directo en el BFF 2.63 s
+  Llamadas simultáneas a Elegibilidad (máximo observado): 40 (sin límite)
+  Eventos del BFF: transiciones del circuito: ninguna | rechazos del bulkhead: 0
+  Evidencia guardada en 3b_bulkhead_sin-patron_estado.json y 3b_bulkhead_sin-patron_eventos.jsonl
+  Consistencia: stock 0/60 disponible | cupos reservados: 60 | citas activas: 60 | [OK] Cupos y Registro coinciden
+  Resultados guardados en 3b_bulkhead_sin-patron.csv
+
+==============================================================================
+Escenario extra: ráfaga de 20 consultas contra el gateway (rate limit de 15 por minuto)
+==============================================================================
+  Configurando sistema: Circuit Breaker=ON, Bulkhead=ON, rate limit normal...
+  Aceptadas (200): 14 | rechazadas (429): 6 | primera 429 en la petición #15, Retry-After 59 s
+  Resultados guardados en 4_ratelimit.csv
+
+==============================================================================
+Resumen comparativo
+==============================================================================
+  Escenario                      Prom. (s)  Consist.  OK   Resultado
+  1. Camino feliz                    0.039  sí        sí   5/5 CONFIRMADA, reintento sin duplicar: sí
+  2. Compensación                    0.836  sí        sí   3/3 compensadas como se esperaba (incluye anular -> liberar)
+  3. Circuit Breaker ACTIVO          0.990  sí        sí   10/10 fallback | lenta 9.8 s, 3/5 a Elegibilidad; caída 0.1 s, 1/5 a Elegibilidad
+  3. Circuit Breaker DESACTIVADO     1.625  sí        sí   10/10 fallback | lenta 16.1 s, 5/5 a Elegibilidad; caída 0.2 s, 5/5 a Elegibilidad
+  3b. Bulkhead ACTIVO                0.558  sí        sí   p50 0.34 s, máx simultáneas 5, resumen prom. 0.04 s
+  3b. Bulkhead DESACTIVADO           4.565  sí        sí   p50 3.58 s, máx simultáneas 40, resumen prom. 3.05 s
+  Rate limit (gateway)               0.020  sí        sí   14 aceptadas, 6 con 429
+  Resultados guardados en resumen.csv
+
+Restaurando configuración por defecto (patrones ON, rate limit normal)...
+Salida completa y archivos de la corrida en experimentos/resultados/20261117-001439/
