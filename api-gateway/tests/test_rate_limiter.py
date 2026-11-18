@@ -3,6 +3,7 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
+from auth import crear_token, extraer_identificador_cliente
 from rate_limiter import RateLimiterMemoria
 
 
@@ -46,3 +47,26 @@ def test_aislamiento_entre_diferentes_ips(limiter):
     # IP B no debe verse afectada por el tráfico de IP A
     permitido_b, _ = limiter.verificar_limite(ip_b)
     assert permitido_b, "IP B debe seguir teniendo acceso"
+
+
+def test_aislamiento_entre_usuarios_jwt_en_misma_ip(limiter):
+    """Dos clientes autenticados con distinto JWT desde la misma IP tienen límites separados."""
+    misma_ip = "172.18.0.1"
+    token_operador = crear_token("operador", "escritura")["access_token"]
+    token_lector = crear_token("lector", "lectura")["access_token"]
+
+    clave_operador = extraer_identificador_cliente(f"Bearer {token_operador}", misma_ip)
+    clave_lector = extraer_identificador_cliente(f"Bearer {token_lector}", misma_ip)
+    clave_anonimo = extraer_identificador_cliente(None, misma_ip)
+
+    assert clave_operador == "user:operador"
+    assert clave_lector == "user:lector"
+    assert clave_anonimo == f"ip:{misma_ip}"
+
+    # Agotar límite del operador
+    for _ in range(5):
+        assert limiter.verificar_limite(clave_operador)[0] is True
+    assert limiter.verificar_limite(clave_operador)[0] is False
+
+    # El lector en la misma IP no debe verse bloqueado
+    assert limiter.verificar_limite(clave_lector)[0] is True

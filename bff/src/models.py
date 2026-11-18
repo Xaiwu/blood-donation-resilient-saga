@@ -14,8 +14,8 @@ class SolicitudAgendarDonacion(BaseModel):
     horario: str = Field(..., description="Horario agendado (ej. 10:30)")
     email_donante: Optional[str] = Field(None, description="Correo electrónico del donante")
     telefono_donante: Optional[str] = Field(None, description="Teléfono de contacto")
-    edad: Optional[int] = Field(None, ge=18, le=65, description="Edad del donante")
-    peso_kg: Optional[float] = Field(None, ge=50.0, description="Peso corporal en kg")
+    edad: Optional[int] = Field(None, ge=0, description="Edad del donante")
+    peso_kg: Optional[float] = Field(None, ge=0.0, description="Peso corporal en kg")
     grupo_sanguineo: Optional[str] = Field(None, description="Grupo sanguíneo si se conoce")
 
 
@@ -36,5 +36,7 @@ class ResumenDonante(BaseModel):
     nombre: Optional[str] = None
     citas_historicas: List[Dict[str, Any]] = Field(default_factory=list)
     cupos_activos: List[Dict[str, Any]] = Field(default_factory=list)
-    proxima_cita: Optional[Dict[str, Any]] = None
+    ultima_cita: Optional[Dict[str, Any]] = None
     estado_elegibilidad_reciente: Optional[str] = None
+    datos_parciales: bool = False
+    advertencias: List[str] = Field(default_factory=list)

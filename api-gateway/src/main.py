@@ -17,6 +17,7 @@ from .auth import (
     ROL_LECTURA,
     autenticar,
     crear_token,
+    extraer_identificador_cliente,
     verificar_token,
 )
 from .rate_limiter import RateLimiterMemoria
@@ -50,16 +51,19 @@ rate_limiter = RateLimiterMemoria(max_peticiones=RATE_LIMIT_RPM, ventana_segundo
 
 @app.middleware("http")
 async def rate_limiting_middleware(request: Request, call_next):
-    """Aplica control de flujo por IP rechazando ráfagas que superen el umbral configurado."""
+    """Aplica control de flujo por cliente JWT ('sub') o por IP si no hay token válido."""
     if request.url.path in ("/health", "/salud", "/docs", "/openapi.json"):
         return await call_next(request)
 
     ip_cliente = request.client.host if request.client else "127.0.0.1"
-    permitido, retry_after = rate_limiter.verificar_limite(ip_cliente)
+    clave_cliente = extraer_identificador_cliente(
+        request.headers.get("authorization"), ip_cliente
+    )
+    permitido, retry_after = rate_limiter.verificar_limite(clave_cliente)
 
     if not permitido:
         logger.warning(
-            "Rate limit excedido para IP %s en ruta %s", ip_cliente, request.url.path
+            "Rate limit excedido para cliente %s en ruta %s", clave_cliente, request.url.path
         )
         return JSONResponse(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
