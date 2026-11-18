@@ -4,19 +4,6 @@ Agendamiento de donaciones de sangre como una **Saga orquestada** entre tres ser
 
 ## Arquitectura
 
-```mermaid
-flowchart LR
-    C[Cliente] -->|":8080 JWT"| GW[API Gateway<br/>auth · rate limit · enrutamiento]
-    subgraph interna [Red interna, sin puertos al host]
-        GW --> BFF[BFF<br/>orquestador Saga · agregación<br/>Circuit Breaker + Bulkhead]
-        BFF --> CU[Cupos :5001]
-        BFF --> EL[Elegibilidad :5002<br/>servicio externo simulado]
-        BFF --> RE[Registro :5003]
-        CU --- DB1[(cupos.db)]
-        RE --- DB2[(registro.db)]
-    end
-```
-
 | Servicio | Puerto | Responsabilidad |
 |---|---|---|
 | `api-gateway` | **8080 (único expuesto)** | Valida el JWT, limita peticiones por usuario y enruta `/api/*` al BFF |
