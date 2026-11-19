@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.db import (
     CitaNoEncontradaError,
     ColisionIdempotenciaError,
+    SagaCanceladaError,
     anular_donacion,
     init_db,
     obtener_citas_donante,
@@ -107,6 +108,18 @@ class TestRegistroPersistence(unittest.TestCase):
         a2 = anular_donacion("saga-ciclo", db_path=self.db_path)
         self.assertFalse(a2["idempotente"])
         self.assertEqual(a2["estado"], "ANULADA")
+        self.assertEqual(len(obtener_citas_donante("12.345.678-9", db_path=self.db_path)), 0)
+
+    def test_anular_antes_de_registrar_rechaza_registro_posterior(self) -> None:
+        """Si la compensación llega antes que el registro, anular responde 404 y el registro posterior se rechaza (409)."""
+        with self.assertRaises(CitaNoEncontradaError):
+            anular_donacion("saga-fuera-de-orden", db_path=self.db_path)
+
+        with self.assertRaises(SagaCanceladaError):
+            registrar_donacion(
+                "saga-fuera-de-orden", "12.345.678-9", "Ana Pérez", "JORNADA-01", "09:00", "APTO", self.db_path
+            )
+
         self.assertEqual(len(obtener_citas_donante("12.345.678-9", db_path=self.db_path)), 0)
 
 
@@ -210,7 +223,10 @@ class TestRegistroEndpoints(unittest.TestCase):
             r_reset = self.client.post("/config/reset")
         self.assertFalse(r_reset.json()["simular_falla"])
 
-        r_ok = self.client.post("/registro/donaciones", json=payload, headers={"X-Saga-ID": "saga-caida"})
+        r_tardio = self.client.post("/registro/donaciones", json=payload, headers={"X-Saga-ID": "saga-caida"})
+        self.assertEqual(r_tardio.status_code, 409)
+
+        r_ok = self.client.post("/registro/donaciones", json=payload, headers={"X-Saga-ID": "saga-recuperada"})
         self.assertEqual(r_ok.status_code, 201)
 
     @patch("src.caos.time.sleep")

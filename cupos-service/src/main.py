@@ -5,7 +5,7 @@ from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 
 from src.db import (ColisionIdempotenciaError, JornadaNoEncontradaError, JornadaSinCuposError,
-    ReservaNoEncontradaError, init_db, liberar_cupo, logger, obtener_cupos_donante, reservar_cupo,)
+    ReservaNoEncontradaError, SagaCanceladaError, init_db, liberar_cupo, logger, obtener_cupos_donante, reservar_cupo,)
 from src.models import (CupoDonanteItem, LiberarCupoRequest, LiberarCupoResponse,
     ReservaCupoRequest, ReservaCupoResponse,)
 
@@ -20,6 +20,7 @@ app = FastAPI(title="Cupos Service",description="Reserva y liberación de cupos 
 # Tipos de errores
 @app.exception_handler(JornadaSinCuposError)
 @app.exception_handler(ColisionIdempotenciaError)
+@app.exception_handler(SagaCanceladaError)
 async def conflicto_handler(_req: Request, exc: Exception) -> JSONResponse:
     return JSONResponse(status_code=status.HTTP_409_CONFLICT, content={"detail": str(exc)})
 
