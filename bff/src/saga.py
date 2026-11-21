@@ -180,9 +180,9 @@ def paso_reservar_cupo(payload: Dict[str, Any], headers: Dict[str, str]) -> Dict
     try:
         r = requests.post(url, json=payload, headers=headers, timeout=TIMEOUT_SEGUNDOS)
     except requests.Timeout as e:
-        # Si la reserva dio timeout, pudo haberse procesado: liberamos preventivamente
-        # sin aceptar 404 como éxito inmediato (el servicio podría estar aún grabando).
-        liberado = comp_liberar_cupo(payload, headers, aceptar_404=False)
+        # Si la reserva dio timeout, liberamos preventivamente: Cupos persiste la marca
+        # en sagas_canceladas antes de responder 404, garantizando rechazo (409) si llega tarde.
+        liberado = comp_liberar_cupo(payload, headers, aceptar_404=True)
         if liberado:
             detalle = f"Timeout en servicio de cupos (reserva liberada preventivamente): {str(e)}"
         else:
@@ -379,7 +379,7 @@ def ejecutar_saga_agendamiento(
                 (
                     "anular_registro",
                     lambda: comp_anular_registro(
-                        id_saga, payload_registro, headers_internos, aceptar_404=True #Pasar de False a True
+                        id_saga, payload_registro, headers_internos, aceptar_404=True
                     ),
                 )
             )

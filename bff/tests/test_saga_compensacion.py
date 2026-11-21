@@ -431,19 +431,19 @@ def test_reintento_tras_saga_degradada_no_apto_anula_registro_y_libera_cupo(
 
 @patch("saga.time.sleep")
 @patch("requests.post")
-def test_timeout_en_reservar_cupo_reintenta_404_y_reporta_fallo_si_no_libera(
+def test_timeout_en_reservar_cupo_fallo_liberacion_reporta_reconciliacion(
     mock_post, mock_sleep, payload_donacion, id_saga_test
 ):
     """
-    Issue #13: Ante Timeout en Paso 1 (Cupos), la liberación preventiva NO acepta 404 como éxito,
-    reintenta con backoff y, si sigue sin confirmar liberación, reporta fallo de reconciliación.
+    Issue #13: Ante Timeout en Paso 1 (Cupos), si la liberación preventiva falla los 3 intentos
+    (ej. 500/caída), reintenta con backoff y reporta fallo de reconciliación.
     """
-    resp_404 = MagicMock(status_code=404, text="No encontrada aún")
+    resp_500 = MagicMock(status_code=500, text="DB caída")
     mock_post.side_effect = [
         requests.Timeout("Timeout al reservar"),
-        resp_404,
-        resp_404,
-        resp_404,
+        resp_500,
+        resp_500,
+        resp_500,
     ]
 
     with pytest.raises(HTTPException) as exc_info:
@@ -454,6 +454,27 @@ def test_timeout_en_reservar_cupo_reintenta_404_y_reporta_fallo_si_no_libera(
     assert "requiere reconciliación" in exc_info.value.detail
     assert mock_post.call_count == 4  # 1 reservar timeout + 3 reintentos liberar
     assert mock_sleep.call_count == 2
+
+
+@patch("saga.time.sleep")
+@patch("requests.post")
+def test_timeout_en_reservar_cupo_con_404_cancelacion_persistida_ok(
+    mock_post, mock_sleep, payload_donacion, id_saga_test
+):
+    """
+    Issue #13 + #14: Ante Timeout en Paso 1 (Cupos), si /cupos/liberar responde 404
+    (tras persistir la marca en sagas_canceladas), se acepta como liberación preventiva exitosa.
+    """
+    resp_404 = MagicMock(status_code=404, text="No encontrada (marcada como cancelada)")
+    mock_post.side_effect = [requests.Timeout("Timeout al reservar"), resp_404]
+
+    with pytest.raises(HTTPException) as exc_info:
+        ejecutar_saga_agendamiento(payload_donacion, id_saga_test)
+
+    assert exc_info.value.status_code == 503
+    assert "reserva liberada preventivamente" in exc_info.value.detail
+    assert mock_post.call_count == 2
+    assert mock_sleep.call_count == 0
 
 
 @patch("saga.time.sleep")
