@@ -303,7 +303,7 @@ def test_colision_409_en_registro_compensa_cupo(
     mock_post, payload_donacion, id_saga_test
 ):
     """
-    Issue #12: Si Registro responde 409 (colisión de idempotencia con datos distintos),
+    Si Registro responde 409 (colisión de idempotencia con datos distintos),
     la Saga debe abortar con 409 y compensar liberando el cupo.
     """
     resp_cupos = MagicMock(status_code=201, content=b'{"ok": true, "idempotente": false}')
@@ -402,7 +402,7 @@ def test_reintento_tras_saga_degradada_no_apto_anula_registro_y_libera_cupo(
     mock_post, payload_donacion, id_saga_test
 ):
     """
-    Issue #11: Si una Saga previa degradó a PENDIENTE_VALIDACION (cupo reservado y cita creada),
+    Si una Saga previa degradó a PENDIENTE_VALIDACION (cupo reservado y cita creada),
     y un reintento con la misma Idempotency-Key encuentra a Elegibilidad recuperada respondiendo 422,
     Cupos responde idempotente=True y la compensación LIFO debe anular la cita previa Y liberar el cupo.
     """
@@ -435,7 +435,7 @@ def test_timeout_en_reservar_cupo_fallo_liberacion_reporta_reconciliacion(
     mock_post, mock_sleep, payload_donacion, id_saga_test
 ):
     """
-    Issue #13: Ante Timeout en Paso 1 (Cupos), si la liberación preventiva falla los 3 intentos
+    Ante Timeout en Paso 1 (Cupos), si la liberación preventiva falla los 3 intentos
     (ej. 500/caída), reintenta con backoff y reporta fallo de reconciliación.
     """
     resp_500 = MagicMock(status_code=500, text="DB caída")
@@ -462,7 +462,7 @@ def test_timeout_en_reservar_cupo_con_404_cancelacion_persistida_ok(
     mock_post, mock_sleep, payload_donacion, id_saga_test
 ):
     """
-    Issue #13 + #14: Ante Timeout en Paso 1 (Cupos), si /cupos/liberar responde 404
+    Ante Timeout en Paso 1 (Cupos), si /cupos/liberar responde 404
     (tras persistir la marca en sagas_canceladas), se acepta como liberación preventiva exitosa.
     """
     resp_404 = MagicMock(status_code=404, text="No encontrada (marcada como cancelada)")
@@ -518,3 +518,57 @@ def test_timeout_en_registro_con_404_cancelacion_persistida_libera_cupo(
     )
     assert mock_post.call_args_list[4][0][0] == f"{CUPOS_SERVICE_URL}/cupos/liberar"
     assert mock_sleep.call_count == 0
+
+
+@patch("requests.post")
+def test_reintento_idempotente_respeta_estado_persistido_en_registro(
+    mock_post, payload_donacion, id_saga_test
+):
+    """
+    Si Registro responde idempotente=True, la raíz del BFF refleja el estado
+    real persistido en Registro aunque Elegibilidad haya cambiado entre intentos.
+    """
+    # Caso A: cita guardada como PENDIENTE_VALIDACION, pero Elegibilidad ahora responde APTO
+    resp_cupos = MagicMock(status_code=200, content=b'{"ok": true, "idempotente": true}')
+    resp_cupos.json.return_value = {"ok": True, "idempotente": True}
+    resp_eleg_apto = MagicMock(status_code=200, content=b'{"apto": true}')
+    resp_eleg_apto.json.return_value = {"apto": True}
+    resp_reg_pendiente = MagicMock(
+        status_code=200,
+        content=(
+            b'{"cita_id": "c-1", "estado": "PENDIENTE_VALIDACION", '
+            b'"estado_elegibilidad": "PENDIENTE_VALIDACION", "idempotente": true}'
+        ),
+    )
+    resp_reg_pendiente.json.return_value = {
+        "cita_id": "c-1",
+        "estado": "PENDIENTE_VALIDACION",
+        "estado_elegibilidad": "PENDIENTE_VALIDACION",
+        "idempotente": True,
+    }
+    mock_post.side_effect = [resp_cupos, resp_eleg_apto, resp_reg_pendiente]
+
+    res_a = ejecutar_saga_agendamiento(payload_donacion, id_saga_test)
+    assert res_a["estado"] == "PENDIENTE_VALIDACION"
+    assert res_a["elegibilidad_estado"] == "PENDIENTE_VALIDACION"
+
+    # Caso B: cita guardada como CONFIRMADA, pero Elegibilidad ahora está caída (503)
+    resp_eleg_503 = MagicMock(status_code=503, content=b'{"error": "caido"}')
+    resp_reg_confirmada = MagicMock(
+        status_code=200,
+        content=(
+            b'{"cita_id": "c-2", "estado": "CONFIRMADA", '
+            b'"estado_elegibilidad": "APTO", "idempotente": true}'
+        ),
+    )
+    resp_reg_confirmada.json.return_value = {
+        "cita_id": "c-2",
+        "estado": "CONFIRMADA",
+        "estado_elegibilidad": "APTO",
+        "idempotente": True,
+    }
+    mock_post.side_effect = [resp_cupos, resp_eleg_503, resp_reg_confirmada]
+
+    res_b = ejecutar_saga_agendamiento(payload_donacion, f"{id_saga_test}-b")
+    assert res_b["estado"] == "CONFIRMADA"
+    assert res_b["elegibilidad_estado"] == "APTO"
