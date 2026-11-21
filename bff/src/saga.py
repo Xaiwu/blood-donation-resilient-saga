@@ -372,13 +372,14 @@ def ejecutar_saga_agendamiento(
         try:
             datos_registro = paso_registrar_donacion(payload_registro, headers_internos)
         except ErrorResultadoInciertoRegistro as err_incierto:
-            # Estado incierto en Paso 3: apilar compensación de Registro sin aceptar 404
+            # Estado incierto en Paso 3: Registro persiste la cancelación (sagas_canceladas)
+            # antes de responder 404, por lo que 404 garantiza que la cita no podrá crearse.
             hechas = [item for item in hechas if item[0] != "anular_registro"]
             hechas.append(
                 (
                     "anular_registro",
                     lambda: comp_anular_registro(
-                        id_saga, payload_registro, headers_internos, aceptar_404=False
+                        id_saga, payload_registro, headers_internos, aceptar_404=True #Pasar de False a True
                     ),
                 )
             )
