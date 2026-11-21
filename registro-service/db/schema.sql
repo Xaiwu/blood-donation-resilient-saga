@@ -2,7 +2,7 @@
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 PRAGMA foreign_keys = ON;
-PRAGMA busy_timeout = 5000;
+PRAGMA busy_timeout = 2000;
 
 -- Tabla de citas médicas de donación agendadas
 CREATE TABLE IF NOT EXISTS citas_donacion (
@@ -28,4 +28,10 @@ CREATE TABLE IF NOT EXISTS log_registro (
     detalle TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (id_cita) REFERENCES citas_donacion(id_cita)
+);
+
+-- Tabla de marcas de sagas canceladas antes de concretar el registro
+CREATE TABLE IF NOT EXISTS sagas_canceladas (
+    id_saga TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

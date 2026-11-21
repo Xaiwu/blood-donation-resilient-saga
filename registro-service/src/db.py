@@ -18,6 +18,10 @@ class ColisionIdempotenciaError(Exception):
     """ID de SAGA ya existe con datos distintos (HTTP 409)."""
 
 
+class SagaCanceladaError(Exception):
+    """La SAGA fue cancelada previamente por compensación (HTTP 409)."""
+
+
 class CitaNoEncontradaError(Exception):
     """La cita solicitada para anular no existe (HTTP 404)."""
 
@@ -27,9 +31,9 @@ def get_connection(db_path: Optional[str] = None) -> sqlite3.Connection:
     target = Path(db_path or os.getenv("DATABASE_PATH", DEFAULT_DB_PATH)).resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(str(target), timeout=10.0, isolation_level=None)
+    conn = sqlite3.connect(str(target), timeout=2.0, isolation_level=None)
     conn.row_factory = sqlite3.Row
-    for pragma in ("journal_mode = WAL", "synchronous = NORMAL", "foreign_keys = ON", "busy_timeout = 5000"):
+    for pragma in ("journal_mode = WAL", "synchronous = NORMAL", "foreign_keys = ON", "busy_timeout = 2000"):
         conn.execute(f"PRAGMA {pragma};")
     return conn
 
@@ -83,6 +87,11 @@ def registrar_donacion(
 
     try:
         with immediate_transaction(db_path) as conn:
+            cancelada = conn.execute("SELECT 1 FROM sagas_canceladas WHERE id_saga = ?", (id_saga,)).fetchone()
+            if cancelada is not None:
+                logger.warning("[REGISTRO] REGISTRO RECHAZADO POR SAGA CANCELADA (409) | id_saga=%s", id_saga)
+                raise SagaCanceladaError("La SAGA ya fue cancelada previamente por compensación")
+
             existente = conn.execute("SELECT * FROM citas_donacion WHERE id_saga = ?", (id_saga,)).fetchone()
 
             if existente is not None:
@@ -150,7 +159,9 @@ def anular_donacion(id_saga: str, db_path: Optional[str] = None) -> Dict[str, An
             (id_saga,),
         ).fetchone()
         if cita is None:
-            logger.warning("[REGISTRO] CITA NO ENCONTRADA PARA ANULAR (404) | saga=%s", id_saga)
+            conn.execute("INSERT OR IGNORE INTO sagas_canceladas (id_saga) VALUES (?)", (id_saga,))
+            conn.execute("COMMIT;")
+            logger.warning("[REGISTRO] CITA NO ENCONTRADA PARA ANULAR (404) | saga=%s (marcada como cancelada)", id_saga)
             raise CitaNoEncontradaError("No se encontró ninguna cita registrada para el id_saga indicado.")
 
         id_cita_actual = cita["id_cita"]

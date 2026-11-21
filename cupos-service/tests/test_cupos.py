@@ -16,6 +16,7 @@ from src.db import (
     JornadaNoEncontradaError,
     JornadaSinCuposError,
     ReservaNoEncontradaError,
+    SagaCanceladaError,
     get_connection,
     init_db,
     liberar_cupo,
@@ -142,6 +143,17 @@ class TestCuposPersistence(unittest.TestCase):
         self.assertEqual(resultados.count("OK"), 1)
         self.assertEqual(resultados.count("SIN_CUPOS"), total_hilos - 1)
         self.assertEqual(self._stock_disponible("JORNADA-UNICA"), 0)
+
+    def test_liberar_antes_de_reservar_rechaza_reserva_posterior(self) -> None:
+        """Si la compensación llega antes que la reserva, liberar responde 404 y la reserva posterior se rechaza (409)."""
+        with self.assertRaises(ReservaNoEncontradaError):
+            liberar_cupo("saga-fuera-de-orden", db_path=self.db_path)
+
+        with self.assertRaises(SagaCanceladaError):
+            reservar_cupo("12.345.678-9", "JORNADA-01", "09:00", id_saga="saga-fuera-de-orden", db_path=self.db_path)
+
+        self.assertEqual(self._stock_disponible("JORNADA-01"), 10)
+        self.assertEqual(len(obtener_cupos_donante("12.345.678-9", db_path=self.db_path)), 0)
 
 
 if __name__ == "__main__":
