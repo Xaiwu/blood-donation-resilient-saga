@@ -8,6 +8,7 @@ from src.caos import FallaSimuladaError, aplicar_falla, demorar_respuesta, route
 from src.db import (
     CitaNoEncontradaError,
     ColisionIdempotenciaError,
+    SagaCanceladaError,
     anular_donacion,
     init_db,
     logger,
@@ -47,7 +48,8 @@ async def falla_simulada_handler(_req: Request, exc: FallaSimuladaError) -> JSON
 
 
 @app.exception_handler(ColisionIdempotenciaError)
-async def conflicto_handler(_req: Request, exc: ColisionIdempotenciaError) -> JSONResponse:
+@app.exception_handler(SagaCanceladaError)
+async def conflicto_handler(_req: Request, exc: Exception) -> JSONResponse:
     return JSONResponse(status_code=status.HTTP_409_CONFLICT, content={"detail": str(exc)})
 
 

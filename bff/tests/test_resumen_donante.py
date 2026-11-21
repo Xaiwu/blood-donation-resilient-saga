@@ -2,7 +2,6 @@ import os
 import sys
 from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
-import pytest
 import requests
 
 sys.path.insert(

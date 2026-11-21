@@ -2,7 +2,7 @@
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 PRAGMA foreign_keys = ON;
-PRAGMA busy_timeout = 5000;
+PRAGMA busy_timeout = 2000;
 
 -- Tabla de jornadas
 CREATE TABLE IF NOT EXISTS jornadas (
@@ -24,6 +24,12 @@ CREATE TABLE IF NOT EXISTS cupos (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (id_jornada) REFERENCES jornadas(id_jornada)
+);
+
+-- Tabla de marcas de sagas canceladas antes de concretar la reserva
+CREATE TABLE IF NOT EXISTS sagas_canceladas (
+    id_saga TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- Tabla de log de cupos que permite guardar un registro de cada operación sobre un cupo
