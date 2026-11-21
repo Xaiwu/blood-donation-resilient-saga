@@ -18,7 +18,7 @@ class RateLimiterMemoria:  # pylint: disable=too-few-public-methods
 
     def verificar_limite(self, ip_cliente: str) -> tuple[bool, int]:
         """Verifica si la IP cliente puede realizar una petición según la cuota actual."""
-        ahora = time.time()
+        ahora = time.monotonic()
         inicio_ventana = ahora - self.ventana_segundos
         # Limpiar marcas de tiempo fuera de la ventana deslizante actual
         self.registro[ip_cliente] = [
