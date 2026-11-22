@@ -90,24 +90,19 @@ class TestRegistroPersistence(unittest.TestCase):
         with self.assertRaises(CitaNoEncontradaError):
             anular_donacion("saga-inexistente", db_path=self.db_path)
 
-    def test_ciclo_registrar_anular_reregistrar_anular(self) -> None:
-        """Verifica que tras compensar y re-registrar el mismo id_saga, una nueva anulación vuelve a anular la cita."""
-        r1 = registrar_donacion("saga-ciclo", "12.345.678-9", "Ana Pérez", "JORNADA-01", "11:00", "APTO", self.db_path)
+    def test_registrar_tras_anular_rechaza_con_409(self) -> None:
+        """Verifica que tras compensar (ANULADA), cualquier intento de re-registrar el mismo id_saga es rechazado con 409."""
+        registrar_donacion("saga-ciclo", "12.345.678-9", "Ana Pérez", "JORNADA-01", "11:00", "APTO", self.db_path)
         self.assertEqual(len(obtener_citas_donante("12.345.678-9", db_path=self.db_path)), 1)
 
         a1 = anular_donacion("saga-ciclo", db_path=self.db_path)
         self.assertFalse(a1["idempotente"])
+        self.assertEqual(a1["estado"], "ANULADA")
         self.assertEqual(len(obtener_citas_donante("12.345.678-9", db_path=self.db_path)), 0)
 
-        r2 = registrar_donacion("saga-ciclo", "12.345.678-9", "Ana Pérez", "JORNADA-01", "11:00", "APTO", self.db_path)
-        self.assertFalse(r2["idempotente"])
-        self.assertEqual(r1["cita_id"], r2["cita_id"])
-        self.assertEqual(r2["estado"], "CONFIRMADA")
-        self.assertEqual(len(obtener_citas_donante("12.345.678-9", db_path=self.db_path)), 1)
+        with self.assertRaises(SagaCanceladaError):
+            registrar_donacion("saga-ciclo", "12.345.678-9", "Ana Pérez", "JORNADA-01", "11:00", "APTO", self.db_path)
 
-        a2 = anular_donacion("saga-ciclo", db_path=self.db_path)
-        self.assertFalse(a2["idempotente"])
-        self.assertEqual(a2["estado"], "ANULADA")
         self.assertEqual(len(obtener_citas_donante("12.345.678-9", db_path=self.db_path)), 0)
 
     def test_anular_antes_de_registrar_rechaza_registro_posterior(self) -> None:

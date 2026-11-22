@@ -95,6 +95,10 @@ def registrar_donacion(
             existente = conn.execute("SELECT * FROM citas_donacion WHERE id_saga = ?", (id_saga,)).fetchone()
 
             if existente is not None:
+                if existente["estado"] == "ANULADA":
+                    logger.warning("[REGISTRO] REGISTRO RECHAZADO POR SAGA COMPENSADA (409) | id_saga=%s", id_saga)
+                    raise SagaCanceladaError("La SAGA ya fue cancelada previamente por compensación")
+
                 mismos_datos = (
                     existente["rut_donante"] == rut_donante
                     and existente["id_jornada"] == id_jornada
@@ -104,34 +108,26 @@ def registrar_donacion(
                     logger.warning("[REGISTRO] COLISION IDEMPOTENCIA (409) | id_saga=%s", id_saga)
                     raise ColisionIdempotenciaError("El id_saga ya pertenece a otra cita con datos distintos.")
 
-                if existente["estado"] != "ANULADA":
-                    _registrar_log(
-                        conn, existente["id_cita"], id_saga, rut_donante,
-                        "REGISTRAR_IDEMPOTENTE", "Reintento idempotente de registro",
-                    )
-                    logger.info("[REGISTRO] CITA IDEMPOTENTE (200) | cita_id=%s | saga=%s", existente["id_cita"], id_saga)
-                    return {
-                        "ok": True,
-                        "cita_id": existente["id_cita"],
-                        "id_saga": id_saga,
-                        "estado_elegibilidad": existente["estado_elegibilidad"],
-                        "estado": existente["estado"],
-                        "idempotente": True,
-                    }
+                _registrar_log(
+                    conn, existente["id_cita"], id_saga, rut_donante,
+                    "REGISTRAR_IDEMPOTENTE", "Reintento idempotente de registro",
+                )
+                logger.info("[REGISTRO] CITA IDEMPOTENTE (200) | cita_id=%s | saga=%s", existente["id_cita"], id_saga)
+                return {
+                    "ok": True,
+                    "cita_id": existente["id_cita"],
+                    "id_saga": id_saga,
+                    "estado_elegibilidad": existente["estado_elegibilidad"],
+                    "estado": existente["estado"],
+                    "idempotente": True,
+                }
 
-                cita_id = existente["id_cita"]
-                conn.execute(
-                    "UPDATE citas_donacion SET nombre_donante = ?, estado_elegibilidad = ?, "
-                    "estado = ?, updated_at = datetime('now') WHERE id_cita = ?",
-                    (nombre_donante, estado_elegibilidad, estado_cita, cita_id),
-                )
-            else:
-                cita_id = f"cita-{uuid.uuid4().hex[:12]}"
-                conn.execute(
-                    "INSERT INTO citas_donacion (id_cita, id_saga, rut_donante, nombre_donante, "
-                    "id_jornada, horario, estado_elegibilidad, estado) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (cita_id, id_saga, rut_donante, nombre_donante, id_jornada, horario, estado_elegibilidad, estado_cita),
-                )
+            cita_id = f"cita-{uuid.uuid4().hex[:12]}"
+            conn.execute(
+                "INSERT INTO citas_donacion (id_cita, id_saga, rut_donante, nombre_donante, "
+                "id_jornada, horario, estado_elegibilidad, estado) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (cita_id, id_saga, rut_donante, nombre_donante, id_jornada, horario, estado_elegibilidad, estado_cita),
+            )
 
             _registrar_log(conn, cita_id, id_saga, rut_donante, "REGISTRAR", f"Cita registrada ({estado_cita})")
             logger.info("[REGISTRO] CITA CREADA (201) | cita_id=%s | saga=%s | estado=%s", cita_id, id_saga, estado_cita)
