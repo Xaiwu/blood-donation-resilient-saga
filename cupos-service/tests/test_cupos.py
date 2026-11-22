@@ -93,28 +93,22 @@ class TestCuposPersistence(unittest.TestCase):
         with self.assertRaises(ReservaNoEncontradaError):
             liberar_cupo("saga-inexistente", db_path=self.db_path)
 
-    def test_ciclo_reservar_liberar_rereservar_liberar(self) -> None:
-        """Verifica que tras compensar y re-reservar el mismo id_saga, una nueva liberación sí devuelve el stock."""
+    def test_reservar_tras_liberar_rechaza_con_409(self) -> None:
+        """Verifica que tras compensar (LIBERADO), cualquier intento de re-reservar el mismo id_saga es rechazado con 409."""
         # 1. Reservar deja stock en 9
-        r1 = reservar_cupo("12.345.678-9", "JORNADA-01", "11:00", id_saga="saga-ciclo", db_path=self.db_path)
+        reservar_cupo("12.345.678-9", "JORNADA-01", "11:00", id_saga="saga-ciclo", db_path=self.db_path)
         self.assertEqual(self._stock_disponible("JORNADA-01"), 9)
 
         # 2. Liberar devuelve stock a 10
         l1 = liberar_cupo("saga-ciclo", db_path=self.db_path)
         self.assertFalse(l1["idempotente"])
+        self.assertEqual(l1["estado"], "LIBERADO")
         self.assertEqual(self._stock_disponible("JORNADA-01"), 10)
 
-        # 3. Re-reservar el mismo id_saga reutiliza el cupo y baja stock a 9
-        r2 = reservar_cupo("12.345.678-9", "JORNADA-01", "11:00", id_saga="saga-ciclo", db_path=self.db_path)
-        self.assertFalse(r2["idempotente"])
-        self.assertEqual(r1["cupo_id"], r2["cupo_id"])
-        self.assertEqual(self._stock_disponible("JORNADA-01"), 9)
-        self.assertEqual(len(obtener_cupos_donante("12.345.678-9", db_path=self.db_path)), 1)
+        # 3. Re-reservar el mismo id_saga es rechazado con SagaCanceladaError (409) sin descontar stock
+        with self.assertRaises(SagaCanceladaError):
+            reservar_cupo("12.345.678-9", "JORNADA-01", "11:00", id_saga="saga-ciclo", db_path=self.db_path)
 
-        # 4. Liberar de nuevo debe restituir el stock a 10 y dejar el cupo en LIBERADO
-        l2 = liberar_cupo("saga-ciclo", db_path=self.db_path)
-        self.assertFalse(l2["idempotente"])
-        self.assertEqual(l2["estado"], "LIBERADO")
         self.assertEqual(self._stock_disponible("JORNADA-01"), 10)
         self.assertEqual(len(obtener_cupos_donante("12.345.678-9", db_path=self.db_path)), 0)
 
