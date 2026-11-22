@@ -58,7 +58,7 @@ def test_integracion_timeout_registro_404_persiste_cancelacion_y_libera_cupo(
     registro_client,
 ):
     """
-    Prueba de integración BFF <-> registro-service (#13 + #14):
+    Prueba de integración BFF <-> registro-service ante timeout en Paso 3:
     1. Cupos reserva 1 cupo (disponibles: 1 -> 0).
     2. Elegibilidad valida al donante.
     3. Paso 3 (Registro) sufre un Timeout antes de crear la cita.

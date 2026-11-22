@@ -205,7 +205,7 @@ def paso_reservar_cupo(payload: Dict[str, Any], headers: Dict[str, str]) -> Dict
     if r.status_code == 409:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"No hay cupos disponibles para la jornada: {r.text}",
+            detail=f"Conflicto en servicio de cupos: {r.text}",
         )
     if r.status_code >= 500:
         raise HTTPException(
@@ -260,7 +260,7 @@ def paso_validar_elegibilidad(
                 detail="Donante no apto clínicamente para donación",
             )
         return "APTO", datos
-    except (requests.Timeout, requests.ConnectionError, DependenciaNoDisponible) as e:
+    except (requests.RequestException, DependenciaNoDisponible) as e:
         # DependenciaNoDisponible: circuito abierto o bulkhead lleno (fail-fast)
         logger.warning(
             "Elegibilidad inestable/caída (%s). Degradando a PENDIENTE_VALIDACION",
@@ -389,6 +389,9 @@ def ejecutar_saga_agendamiento(
             ) from err_incierto
 
         estado_final = "CONFIRMADA" if estado_eleg == "APTO" else "PENDIENTE_VALIDACION"
+        if isinstance(datos_registro, dict) and datos_registro.get("idempotente") is True:
+            estado_final = datos_registro.get("estado") or estado_final
+            estado_eleg = datos_registro.get("estado_elegibilidad") or estado_eleg
         logger.info("[SAGA %s] SAGA COMPLETADA EXITOSAMENTE: Estado=%s", id_saga, estado_final)
 
         return {

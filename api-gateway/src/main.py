@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from .auth import (
-    ROL_LECTURA,
+    ROL_ESCRITURA,
     autenticar,
     crear_token,
     extraer_identificador_cliente,
@@ -37,11 +37,11 @@ app = FastAPI(
     description="Punto de acceso perimetral con JWT, rate limiting y enrutamiento hacia BFF",
 )
 
-# Configuración de CORS
+# Configuración de CORS (sin allow_credentials con wildcard '*')
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -130,16 +130,18 @@ async def proxy_hacia_bff(
     4. Reenvía la petición al BFF mediante requests.request.
     """
     es_operacion_mutante = request.method in ("POST", "PUT", "DELETE", "PATCH")
-    if es_operacion_mutante and payload.get("rol") == ROL_LECTURA:
+    if es_operacion_mutante and payload.get("rol") != ROL_ESCRITURA:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={
                 "error": "PROHIBIDO",
-                "mensaje": f"El rol '{ROL_LECTURA}' no tiene permisos para mutar recursos",
+                "mensaje": (
+                    f"El rol '{payload.get('rol')}' no tiene permisos para mutar recursos"
+                ),
             },
         )
 
-    # Construir cabeceras hacia el BFF eliminando las de salto y cualquier intento de suplantación
+    # Construir cabeceras hacia el BFF eliminando las de salto, JWT crudo y suplantación
     cabeceras_internas = {
         k: v
         for k, v in request.headers.items()
@@ -147,6 +149,7 @@ async def proxy_hacia_bff(
         not in (
             "host",
             "content-length",
+            "authorization",
             "x-user-id",
             "x-user-role",
         )
@@ -163,7 +166,7 @@ async def proxy_hacia_bff(
 
     cuerpo = await request.body()
     url_destino = f"{BFF_URL}/api/{path}"
-    parametros = dict(request.query_params)
+    parametros = list(request.query_params.multi_items())
 
     def _ejecutar_proxy():
         return requests.request(
@@ -218,5 +221,8 @@ async def proxy_hacia_bff(
         logger.error("Error inesperado en proxy del Gateway: %s", str(exc))
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": "GATEWAY_ERROR", "mensaje": str(exc)},
+            content={
+                "error": "GATEWAY_ERROR",
+                "mensaje": "Error interno en el proxy del API Gateway",
+            },
         )
