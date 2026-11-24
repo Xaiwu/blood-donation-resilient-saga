@@ -180,9 +180,9 @@ def paso_reservar_cupo(payload: Dict[str, Any], headers: Dict[str, str]) -> Dict
     try:
         r = requests.post(url, json=payload, headers=headers, timeout=TIMEOUT_SEGUNDOS)
     except requests.Timeout as e:
-        # Si la reserva dio timeout, pudo haberse procesado: liberamos preventivamente
-        # sin aceptar 404 como éxito inmediato (el servicio podría estar aún grabando).
-        liberado = comp_liberar_cupo(payload, headers, aceptar_404=False)
+        # Si la reserva dio timeout, liberamos preventivamente: Cupos persiste la marca
+        # en sagas_canceladas antes de responder 404, garantizando rechazo (409) si llega tarde.
+        liberado = comp_liberar_cupo(payload, headers, aceptar_404=True)
         if liberado:
             detalle = f"Timeout en servicio de cupos (reserva liberada preventivamente): {str(e)}"
         else:
@@ -205,7 +205,7 @@ def paso_reservar_cupo(payload: Dict[str, Any], headers: Dict[str, str]) -> Dict
     if r.status_code == 409:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"No hay cupos disponibles para la jornada: {r.text}",
+            detail=f"Conflicto en servicio de cupos: {r.text}",
         )
     if r.status_code >= 500:
         raise HTTPException(
@@ -260,7 +260,7 @@ def paso_validar_elegibilidad(
                 detail="Donante no apto clínicamente para donación",
             )
         return "APTO", datos
-    except (requests.Timeout, requests.ConnectionError, DependenciaNoDisponible) as e:
+    except (requests.RequestException, DependenciaNoDisponible) as e:
         # DependenciaNoDisponible: circuito abierto o bulkhead lleno (fail-fast)
         logger.warning(
             "Elegibilidad inestable/caída (%s). Degradando a PENDIENTE_VALIDACION",
@@ -372,13 +372,14 @@ def ejecutar_saga_agendamiento(
         try:
             datos_registro = paso_registrar_donacion(payload_registro, headers_internos)
         except ErrorResultadoInciertoRegistro as err_incierto:
-            # Estado incierto en Paso 3: apilar compensación de Registro sin aceptar 404
+            # Estado incierto en Paso 3: Registro persiste la cancelación (sagas_canceladas)
+            # antes de responder 404, por lo que 404 garantiza que la cita no podrá crearse.
             hechas = [item for item in hechas if item[0] != "anular_registro"]
             hechas.append(
                 (
                     "anular_registro",
                     lambda: comp_anular_registro(
-                        id_saga, payload_registro, headers_internos, aceptar_404=False
+                        id_saga, payload_registro, headers_internos, aceptar_404=True
                     ),
                 )
             )
@@ -388,6 +389,9 @@ def ejecutar_saga_agendamiento(
             ) from err_incierto
 
         estado_final = "CONFIRMADA" if estado_eleg == "APTO" else "PENDIENTE_VALIDACION"
+        if isinstance(datos_registro, dict) and datos_registro.get("idempotente") is True:
+            estado_final = datos_registro.get("estado") or estado_final
+            estado_eleg = datos_registro.get("estado_elegibilidad") or estado_eleg
         logger.info("[SAGA %s] SAGA COMPLETADA EXITOSAMENTE: Estado=%s", id_saga, estado_final)
 
         return {

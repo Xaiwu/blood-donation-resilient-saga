@@ -18,6 +18,10 @@ class ColisionIdempotenciaError(Exception):
     """ID de SAGA ya existe con datos distintos (HTTP 409)."""
 
 
+class SagaCanceladaError(Exception):
+    """La SAGA fue cancelada previamente por compensación (HTTP 409)."""
+
+
 class CitaNoEncontradaError(Exception):
     """La cita solicitada para anular no existe (HTTP 404)."""
 
@@ -27,9 +31,9 @@ def get_connection(db_path: Optional[str] = None) -> sqlite3.Connection:
     target = Path(db_path or os.getenv("DATABASE_PATH", DEFAULT_DB_PATH)).resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(str(target), timeout=10.0, isolation_level=None)
+    conn = sqlite3.connect(str(target), timeout=2.0, isolation_level=None)
     conn.row_factory = sqlite3.Row
-    for pragma in ("journal_mode = WAL", "synchronous = NORMAL", "foreign_keys = ON", "busy_timeout = 5000"):
+    for pragma in ("journal_mode = WAL", "synchronous = NORMAL", "foreign_keys = ON", "busy_timeout = 2000"):
         conn.execute(f"PRAGMA {pragma};")
     return conn
 
@@ -83,9 +87,18 @@ def registrar_donacion(
 
     try:
         with immediate_transaction(db_path) as conn:
+            cancelada = conn.execute("SELECT 1 FROM sagas_canceladas WHERE id_saga = ?", (id_saga,)).fetchone()
+            if cancelada is not None:
+                logger.warning("[REGISTRO] REGISTRO RECHAZADO POR SAGA CANCELADA (409) | id_saga=%s", id_saga)
+                raise SagaCanceladaError("La SAGA ya fue cancelada previamente por compensación")
+
             existente = conn.execute("SELECT * FROM citas_donacion WHERE id_saga = ?", (id_saga,)).fetchone()
 
             if existente is not None:
+                if existente["estado"] == "ANULADA":
+                    logger.warning("[REGISTRO] REGISTRO RECHAZADO POR SAGA COMPENSADA (409) | id_saga=%s", id_saga)
+                    raise SagaCanceladaError("La SAGA ya fue cancelada previamente por compensación")
+
                 mismos_datos = (
                     existente["rut_donante"] == rut_donante
                     and existente["id_jornada"] == id_jornada
@@ -95,34 +108,26 @@ def registrar_donacion(
                     logger.warning("[REGISTRO] COLISION IDEMPOTENCIA (409) | id_saga=%s", id_saga)
                     raise ColisionIdempotenciaError("El id_saga ya pertenece a otra cita con datos distintos.")
 
-                if existente["estado"] != "ANULADA":
-                    _registrar_log(
-                        conn, existente["id_cita"], id_saga, rut_donante,
-                        "REGISTRAR_IDEMPOTENTE", "Reintento idempotente de registro",
-                    )
-                    logger.info("[REGISTRO] CITA IDEMPOTENTE (200) | cita_id=%s | saga=%s", existente["id_cita"], id_saga)
-                    return {
-                        "ok": True,
-                        "cita_id": existente["id_cita"],
-                        "id_saga": id_saga,
-                        "estado_elegibilidad": existente["estado_elegibilidad"],
-                        "estado": existente["estado"],
-                        "idempotente": True,
-                    }
+                _registrar_log(
+                    conn, existente["id_cita"], id_saga, rut_donante,
+                    "REGISTRAR_IDEMPOTENTE", "Reintento idempotente de registro",
+                )
+                logger.info("[REGISTRO] CITA IDEMPOTENTE (200) | cita_id=%s | saga=%s", existente["id_cita"], id_saga)
+                return {
+                    "ok": True,
+                    "cita_id": existente["id_cita"],
+                    "id_saga": id_saga,
+                    "estado_elegibilidad": existente["estado_elegibilidad"],
+                    "estado": existente["estado"],
+                    "idempotente": True,
+                }
 
-                cita_id = existente["id_cita"]
-                conn.execute(
-                    "UPDATE citas_donacion SET nombre_donante = ?, estado_elegibilidad = ?, "
-                    "estado = ?, updated_at = datetime('now') WHERE id_cita = ?",
-                    (nombre_donante, estado_elegibilidad, estado_cita, cita_id),
-                )
-            else:
-                cita_id = f"cita-{uuid.uuid4().hex[:12]}"
-                conn.execute(
-                    "INSERT INTO citas_donacion (id_cita, id_saga, rut_donante, nombre_donante, "
-                    "id_jornada, horario, estado_elegibilidad, estado) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (cita_id, id_saga, rut_donante, nombre_donante, id_jornada, horario, estado_elegibilidad, estado_cita),
-                )
+            cita_id = f"cita-{uuid.uuid4().hex[:12]}"
+            conn.execute(
+                "INSERT INTO citas_donacion (id_cita, id_saga, rut_donante, nombre_donante, "
+                "id_jornada, horario, estado_elegibilidad, estado) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (cita_id, id_saga, rut_donante, nombre_donante, id_jornada, horario, estado_elegibilidad, estado_cita),
+            )
 
             _registrar_log(conn, cita_id, id_saga, rut_donante, "REGISTRAR", f"Cita registrada ({estado_cita})")
             logger.info("[REGISTRO] CITA CREADA (201) | cita_id=%s | saga=%s | estado=%s", cita_id, id_saga, estado_cita)
@@ -150,7 +155,9 @@ def anular_donacion(id_saga: str, db_path: Optional[str] = None) -> Dict[str, An
             (id_saga,),
         ).fetchone()
         if cita is None:
-            logger.warning("[REGISTRO] CITA NO ENCONTRADA PARA ANULAR (404) | saga=%s", id_saga)
+            conn.execute("INSERT OR IGNORE INTO sagas_canceladas (id_saga) VALUES (?)", (id_saga,))
+            conn.execute("COMMIT;")
+            logger.warning("[REGISTRO] CITA NO ENCONTRADA PARA ANULAR (404) | saga=%s (marcada como cancelada)", id_saga)
             raise CitaNoEncontradaError("No se encontró ninguna cita registrada para el id_saga indicado.")
 
         id_cita_actual = cita["id_cita"]

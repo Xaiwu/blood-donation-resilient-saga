@@ -19,6 +19,9 @@ class JornadaSinCuposError(Exception):
 class ColisionIdempotenciaError(Exception):
     """ID saga o cupo ya existe con otros datos HTTP 409"""
 
+class SagaCanceladaError(Exception):
+    """La SAGA fue cancelada previamente por compensación HTTP 409"""
+
 class ReservaNoEncontradaError(Exception):
     """Reserva para liberar no existe HTTP 404"""
 
@@ -30,9 +33,9 @@ def get_connection(db_path: Optional[str] = None) -> sqlite3.Connection:
     target = Path(db_path or os.getenv("DATABASE_PATH", DEFAULT_DB_PATH)).resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(str(target), timeout=10.0, isolation_level=None)
+    conn = sqlite3.connect(str(target), timeout=2.0, isolation_level=None)
     conn.row_factory = sqlite3.Row
-    for pragma in ("synchronous = NORMAL", "foreign_keys = ON", "busy_timeout = 5000"):
+    for pragma in ("synchronous = NORMAL", "foreign_keys = ON", "busy_timeout = 2000"):
         conn.execute(f"PRAGMA {pragma};")
     return conn
 
@@ -75,15 +78,24 @@ def reservar_cupo(rut_donante: str, id_jornada: str, horario: str, id_saga: str,
     db_path: Optional[str] = None,) -> Dict[str, Any]:
     """
     Reserva un cupo de forma atómica e idempotente usando BEGIN IMMEDIATE.
-    Contrato de re-reserva: si el id_saga existe en estado LIBERADO (tras una compensación)
-    y se vuelve a solicitar con los mismos datos, se reactiva a RESERVADO descontando stock nuevamente.
+    Contrato de compensación: si el id_saga fue compensado (sagas_canceladas o estado LIBERADO),
+    queda cerrado definitivamente y cualquier reintento es rechazado con HTTP 409.
     """
     try:
         with immediate_transaction(db_path) as conn:
+            cancelada = conn.execute("SELECT 1 FROM sagas_canceladas WHERE id_saga = ?", (id_saga,)).fetchone()
+            if cancelada is not None:
+                logger.warning("[CUPOS] RESERVA RECHAZADA POR SAGA CANCELADA (409) | id_saga=%s", id_saga)
+                raise SagaCanceladaError("La SAGA ya fue cancelada previamente por compensación.")
+
             existente = conn.execute("SELECT * FROM cupos WHERE id_saga = ?", (id_saga,)).fetchone()
 
             # Si la reserva ya existe
             if existente is not None:
+                if existente["estado"] == "LIBERADO":
+                    logger.warning("[CUPOS] RESERVA RECHAZADA POR SAGA COMPENSADA (409) | id_saga=%s", id_saga)
+                    raise SagaCanceladaError("La SAGA ya fue cancelada previamente por compensación.")
+
                 mismos_datos = (existente["rut_donante"] == rut_donante and existente["id_jornada"] == id_jornada
                     and existente["horario"] == horario)
                 
@@ -123,20 +135,12 @@ def reservar_cupo(rut_donante: str, id_jornada: str, horario: str, id_saga: str,
                 (id_jornada,),
             )
 
-            # Si estaba en LIBERADO (compensación previa), una nueva solicitud con los mismos datos la vuelve a activar
-            if existente is not None and existente["estado"] == "LIBERADO":
-                nuevo_id = existente["id_cupo"]
-                conn.execute(
-                    "UPDATE cupos SET estado = 'RESERVADO', updated_at = datetime('now') WHERE id_cupo = ?",
-                    (nuevo_id,),
-                )
-            else:
-                nuevo_id = f"cupo-{uuid.uuid4().hex[:12]}"
-                conn.execute(
-                    "INSERT INTO cupos (id_cupo, id_saga, rut_donante, id_jornada, horario, estado) "
-                    "VALUES (?, ?, ?, ?, ?, 'RESERVADO')",
-                    (nuevo_id, id_saga, rut_donante, id_jornada, horario),
-                )
+            nuevo_id = f"cupo-{uuid.uuid4().hex[:12]}"
+            conn.execute(
+                "INSERT INTO cupos (id_cupo, id_saga, rut_donante, id_jornada, horario, estado) "
+                "VALUES (?, ?, ?, ?, ?, 'RESERVADO')",
+                (nuevo_id, id_saga, rut_donante, id_jornada, horario),
+            )
 
             _registrar_log(conn, nuevo_id, id_saga, rut_donante, id_jornada, horario, "RESERVAR", "Reserva confirmada")
             logger.info(
@@ -161,7 +165,9 @@ def liberar_cupo(id_saga: str, db_path: Optional[str] = None) -> Dict[str, Any]:
     with immediate_transaction(db_path) as conn:
         reserva = conn.execute("SELECT * FROM cupos WHERE id_saga = ?", (id_saga,)).fetchone()
         if reserva is None:
-            logger.warning("[CUPOS] RESERVA NO ENCONTRADA (404) | saga=%s", id_saga)
+            conn.execute("INSERT OR IGNORE INTO sagas_canceladas (id_saga) VALUES (?)", (id_saga,))
+            conn.execute("COMMIT;")
+            logger.warning("[CUPOS] RESERVA NO ENCONTRADA (404) | saga=%s (marcada como cancelada)", id_saga)
             raise ReservaNoEncontradaError("No se encontró ninguna reserva asociada para liberar.")
 
         id_cupo_actual = reserva["id_cupo"]

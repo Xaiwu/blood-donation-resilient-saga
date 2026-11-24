@@ -5,6 +5,7 @@ Expone la agregación de datos por cliente y coordina el agendamiento distribuid
 from concurrent.futures import ThreadPoolExecutor
 import logging
 from typing import Optional
+from urllib.parse import quote
 
 import requests
 from fastapi import FastAPI, Header, HTTPException, status
@@ -106,7 +107,7 @@ def obtener_resumen_donante(
 
     def _consultar_registro():
         try:
-            url = f"{REGISTRO_SERVICE_URL}/registro/donantes/{rut}"
+            url = f"{REGISTRO_SERVICE_URL}/registro/donantes/{quote(rut, safe='')}"
             r = requests.get(url, headers=headers, timeout=4.0)
             if r.status_code == 200:
                 datos = r.json() if r.content else []
@@ -114,14 +115,14 @@ def obtener_resumen_donante(
             msg = f"registro-service respondió HTTP {r.status_code}"
             logger.warning("Error consultando citas de donante en registro: %s", msg)
             return [], msg
-        except requests.RequestException as e:
+        except (requests.RequestException, ValueError) as e:
             msg = f"registro-service no disponible ({type(e).__name__})"
             logger.warning("Error consultando citas de donante en registro: %s", str(e))
             return [], msg
 
     def _consultar_cupos():
         try:
-            url = f"{CUPOS_SERVICE_URL}/cupos/donante/{rut}"
+            url = f"{CUPOS_SERVICE_URL}/cupos/donante/{quote(rut, safe='')}"
             r = requests.get(url, headers=headers, timeout=4.0)
             if r.status_code == 200:
                 datos = r.json() if r.content else []
@@ -129,7 +130,7 @@ def obtener_resumen_donante(
             msg = f"cupos-service respondió HTTP {r.status_code}"
             logger.warning("Error consultando cupos de donante en cupos: %s", msg)
             return [], msg
-        except requests.RequestException as e:
+        except (requests.RequestException, ValueError) as e:
             msg = f"cupos-service no disponible ({type(e).__name__})"
             logger.warning("Error consultando cupos de donante en cupos: %s", str(e))
             return [], msg
