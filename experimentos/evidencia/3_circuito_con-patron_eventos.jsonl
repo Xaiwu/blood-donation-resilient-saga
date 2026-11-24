@@ -1,5 +1,5 @@
-{"evento": "circuito_transicion", "ts": 1795042721.878, "circuito": "elegibilidad", "desde": "CERRADO", "hacia": "ABIERTO", "fallos_consecutivos": 3, "motivo": "ReadTimeout"}
-{"evento": "circuito_transicion", "ts": 1795042736.02, "circuito": "elegibilidad", "desde": "ABIERTO", "hacia": "SEMIABIERTO", "fallos_consecutivos": 3}
-{"evento": "circuito_transicion", "ts": 1795042736.077, "circuito": "elegibilidad", "desde": "SEMIABIERTO", "hacia": "ABIERTO", "fallos_consecutivos": 3, "motivo": "_Respuesta5xx"}
-{"evento": "circuito_transicion", "ts": 1795042750.278, "circuito": "elegibilidad", "desde": "ABIERTO", "hacia": "SEMIABIERTO", "fallos_consecutivos": 3}
-{"evento": "circuito_transicion", "ts": 1795042750.281, "circuito": "elegibilidad", "desde": "SEMIABIERTO", "hacia": "CERRADO", "fallos_consecutivos": 0}
+{"evento": "circuito_transicion", "ts": 1795479949.805, "circuito": "elegibilidad", "desde": "CERRADO", "hacia": "ABIERTO", "fallos_consecutivos": 3, "motivo": "ReadTimeout"}
+{"evento": "circuito_transicion", "ts": 1795479964.559, "circuito": "elegibilidad", "desde": "ABIERTO", "hacia": "SEMIABIERTO", "fallos_consecutivos": 3}
+{"evento": "circuito_transicion", "ts": 1795479964.636, "circuito": "elegibilidad", "desde": "SEMIABIERTO", "hacia": "ABIERTO", "fallos_consecutivos": 3, "motivo": "_Respuesta5xx"}
+{"evento": "circuito_transicion", "ts": 1795479979.436, "circuito": "elegibilidad", "desde": "ABIERTO", "hacia": "SEMIABIERTO", "fallos_consecutivos": 3}
+{"evento": "circuito_transicion", "ts": 1795479979.442, "circuito": "elegibilidad", "desde": "SEMIABIERTO", "hacia": "CERRADO", "fallos_consecutivos": 0}
